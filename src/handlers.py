@@ -1,8 +1,6 @@
+# FILE: src/handlers.py
 import logging
-from typing import Optional
-
 from telegram import Update
-from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from .config import config
@@ -35,47 +33,29 @@ from .ratelimit import check_lead_allowed, mark_lead_submitted, human_left
 
 logger = logging.getLogger(__name__)
 
-_ZWS = "\u200b"  # non-empty, but visually empty (для ReplyKeyboardRemove)
 
-
-def _manager_chat_id() -> Optional[int]:
-    raw = (config.MANAGER_CHAT_ID or "").strip()
-    if not raw:
-        logger.error("MANAGER_CHAT_ID is not set (Fly Secret missing).")
-        return None
+def _manager_chat_id() -> int | None:
     try:
-        return int(raw)
+        return int(config.MANAGER_CHAT_ID) if config.MANAGER_CHAT_ID else None
     except Exception:
-        logger.error(f"MANAGER_CHAT_ID is not a number: {raw!r}")
         return None
 
 
-async def _notify_manager(context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+async def _notify_manager(context: ContextTypes.DEFAULT_TYPE, text: str):
+    """
+    Отправляет менеджеру уведомление, если MANAGER_CHAT_ID задан.
+    """
     chat_id = _manager_chat_id()
-    if chat_id is None:
-        return False
+    if not chat_id:
+        return
     try:
         await context.bot.send_message(chat_id=chat_id, text=text)
-        logger.info(f"Manager notified: chat_id={chat_id}")
-        return True
-    except TelegramError:
-        logger.exception(f"Manager notify TelegramError: chat_id={chat_id}")
-        return False
-    except Exception:
-        logger.exception(f"Manager notify unexpected error: chat_id={chat_id}")
-        return False
+    except Exception as e:
+        logger.error(f"Manager notify failed: {e}")
 
 
 def _user_label(user) -> str:
     return f"@{user.username}" if user.username else f"ID:{user.id}"
-
-
-async def _remove_reply_keyboard(message):
-    # Telegram требует непустой текст, поэтому ZWS
-    try:
-        await message.reply_text(_ZWS, reply_markup=remove_reply_kb())
-    except Exception:
-        logger.exception("Failed to remove reply keyboard")
 
 
 async def _blocked_lead_reply(message, seconds_left: int):
@@ -85,39 +65,41 @@ async def _blocked_lead_reply(message, seconds_left: int):
         f"Повторно можно через {t} или через поддержку: {config.SUPPORT_TG}"
     )
     await message.reply_text(txt, reply_markup=menu_kb())
-    await _remove_reply_keyboard(message)
+    # IMPORTANT FIX: PTB не принимает пробел как текст. Убираем клавиатуру корректно.
+    await message.reply_text(".", reply_markup=remove_reply_kb())
 
 
 async def _finalize_and_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     ЕДИНАЯ точка финала:
-    - уведомляет менеджера
     - отправляет FINAL_TEXT клиенту
+    - всегда пытается уведомить менеджера
     - ставит блокировку на 24ч
     - сбрасывает состояние
     """
     user = update.effective_user
-    msg = update.effective_message
     ctx = get_ctx(context.user_data)
 
-    manager_text = "\n".join([
-        "🧾 Новая заявка",
-        f"👤 {_user_label(user)}",
-        f"📦 Пакет: {ctx.package_name or 'не выбран (консультация)'}",
-        f"📝 ТЗ: {ctx.tz or ''}",
-        f"📞 Контакт: {ctx.contact or ''}",
-    ])
+    # 1) Клиенту (всегда)
+    await update.effective_message.reply_text(FINAL_TEXT, reply_markup=menu_kb())
+    # IMPORTANT FIX: PTB не принимает пробел как текст. Убираем клавиатуру корректно.
+    await update.effective_message.reply_text(".", reply_markup=remove_reply_kb())
 
-    # 1) Менеджеру (сначала, чтобы не зависеть от UI-ошибок)
-    ok = await _notify_manager(context, manager_text)
-    if not ok:
-        logger.error("Manager notification failed (see logs above for reason).")
+    # 2) Менеджеру (всегда пытаемся)
+    await _notify_manager(
+        context,
+        "\n".join(
+            [
+                "🧾 Новая заявка",
+                f"👤 {_user_label(user)}",
+                f"📦 Пакет: {ctx.package_name or 'не выбран (консультация)'}",
+                f"📝 ТЗ: {ctx.tz or ''}",
+                f"📞 Контакт: {ctx.contact or ''}",
+            ]
+        ),
+    )
 
-    # 2) Клиенту
-    await msg.reply_text(FINAL_TEXT, reply_markup=menu_kb())
-    await _remove_reply_keyboard(msg)
-
-    # 3) Блокировка
+    # 3) Блокировка на 24ч (фиксируем факт записи)
     await mark_lead_submitted(user.id)
 
     # 4) Сброс
@@ -125,14 +107,39 @@ async def _finalize_and_notify(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    FIX: поддержка deep-link /start site (переход с сайта)
+    Сценарий:
+      - /start site -> сразу переводим в консультацию и просим вставить скопированный текст (ТЗ).
+      - /start без параметров -> показываем меню.
+    """
     reset(context.user_data)
+
+    args = (context.args or [])
+    if args and args[0].lower() == "site":
+        # Блокируем повторную запись, если уже была (как и в обычной консультации)
+        user = update.effective_user
+        allowed, left = await check_lead_allowed(user.id)
+        if not allowed:
+            await _blocked_lead_reply(update.message, left)
+            return
+
+        start_consult(context.user_data)
+        await update.message.reply_text(
+            "Вы пришли с сайта.\n\n"
+            "Вставьте скопированное сообщение одним сообщением (ТЗ, примеры, сроки).",
+            reply_markup=lead_cancel_kb(),
+        )
+        await update.message.reply_text(".", reply_markup=remove_reply_kb())
+        return
+
     await update.message.reply_text(menu_text(), reply_markup=menu_kb())
-    await _remove_reply_keyboard(update.message)
+    await update.message.reply_text(".", reply_markup=remove_reply_kb())
 
 
 async def cmd_packages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Выберите пакет:", reply_markup=packages_kb())
-    await _remove_reply_keyboard(update.message)
+    await update.message.reply_text(".", reply_markup=remove_reply_kb())
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -181,6 +188,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ctx.package_name = name
 
         text = render_package_text(name)
+
         await q.message.edit_text(text, parse_mode="HTML", reply_markup=package_details_kb())
         await q.answer()
         return
@@ -208,7 +216,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "LEAD:CANCEL":
         reset(context.user_data)
         await q.message.reply_text("Отменено.", reply_markup=menu_kb())
-        await _remove_reply_keyboard(q.message)
+        await q.message.reply_text(".", reply_markup=remove_reply_kb())
         await q.answer()
         return
 
@@ -222,17 +230,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "❌ Отмена":
         reset(context.user_data)
         await update.message.reply_text("Отменено.", reply_markup=menu_kb())
-        await _remove_reply_keyboard(update.message)
+        await update.message.reply_text(".", reply_markup=remove_reply_kb())
         return
 
     state = get_state(context.user_data)
 
     if text == "⬅️ Назад" and state == State.LEAD_CONTACT:
         context.user_data["state"] = State.LEAD_TZ.value
-        await update.message.reply_text(
-            "Ок. Снова напишите ТЗ одним сообщением.",
-            reply_markup=remove_reply_kb(),
-        )
+        await update.message.reply_text("Ок. Снова напишите ТЗ одним сообщением.", reply_markup=remove_reply_kb())
         return
 
     if state == State.LEAD_TZ:
@@ -248,9 +253,4 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if state == State.LEAD_CONTACT:
-        accept_contact(context.user_data, text)
-        await _finalize_and_notify(update, context)
-        return
-
-    resp = await ask_openrouter(text)
-    await update.message.reply_text(resp, reply_markup=remove_reply_kb())
+        accept_contact(cont_
