@@ -25,6 +25,7 @@ from .ui import (
     lead_cancel_kb,
     contacts_reply_kb,
     remove_reply_kb,
+    render_package_text,  # FIX: импорт рендера текста пакета
 )
 from .openrouter import ask_openrouter
 from .ratelimit import check_lead_allowed, mark_lead_submitted, human_left
@@ -112,15 +113,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ctx = get_ctx(context.user_data)
         ctx.package_name = name
 
-        p = PACKAGES[name]
-        features = "\n".join(f"• {f}" for f in p["features"])
-        text = (
-            f"📦 <b>{name}</b>\n\n"
-            f"💰 <b>{p['price']}</b>\n"
-            f"⏱️ <b>{p['time']}</b>\n\n"
-            f"✨ Включено:\n{features}\n\n"
-            f"📝 <b>{p['desc']}</b>"
-        )
+        # FIX: используем новый информативный рендер из ui.py
+        text = render_package_text(name)
+
         await q.message.edit_text(text, parse_mode="HTML", reply_markup=package_details_kb())
         await q.answer()
         return
