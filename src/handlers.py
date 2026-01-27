@@ -1,10 +1,15 @@
 # FILE: src/handlers.py
+# python-telegram-bot v20+
 from __future__ import annotations
 
 import html
+import json
+import logging
 import os
+import re
 from dataclasses import dataclass
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional, Tuple
 
 from telegram import (
     InlineKeyboardButton,
@@ -14,449 +19,437 @@ from telegram import (
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
+log = logging.getLogger(__name__)
 
-# =========================
+# ==========
 # CONFIG
-# =========================
-BOT_USERNAME = os.getenv("BOT_USERNAME", "vektorwebbot")
-MANAGER_CHAT_ID = os.getenv("MANAGER_CHAT_ID")  # обязательно в Secrets/Env
-MANAGER_THREAD_ID = os.getenv("MANAGER_THREAD_ID")  # опционально (для topics)
-SITE_NAME = os.getenv("SITE_NAME", "Vektor Web")
+# ==========
+BOT_TG_URL = os.getenv("BOT_TG_URL", "https://t.me/vektorwebbot")
+MANAGER_CHAT_ID = os.getenv("MANAGER_CHAT_ID", "").strip()  # numeric chat id recommended
+BRAND_NAME = os.getenv("BRAND_NAME", "VEKTOR Web")
 
-# Packages (единый источник истины)
-PACKAGES = [
-    ("Мини-сайт", "10 000 ₽"),
-    ("Блогер Старт", "25 000 ₽"),
-    ("Профи", "50 000 ₽"),
-    ("Бизнес-Лендинг", "75 000 ₽"),
-    ("Магазин", "100 000 ₽"),
-    ("Автоматизация", "125 000 ₽"),
-    ("Портфолио Pro", "150 000 ₽"),
-    ("Индивидуальное решение", "от 200 000 ₽"),
-]
+# If you use OpenRouter in your project, keep it in your own module.
+# This handlers.py is safe without OpenRouter. If you already have ai_client.py,
+# you can plug it into call_ai() below.
+AI_ENABLED = os.getenv("AI_ENABLED", "1").strip() not in ("0", "false", "False", "")
+AI_MODEL = os.getenv("AI_MODEL", "").strip()
 
-# States
-S_MENU = "MENU"
-S_LEAD_NAME = "LEAD_NAME"
-S_LEAD_CONTACT = "LEAD_CONTACT"
-S_LEAD_PACKAGE = "LEAD_PACKAGE"
-S_LEAD_DESC = "LEAD_DESC"
-S_LEAD_CONFIRM = "LEAD_CONFIRM"
-
-UD_STATE = "state"
-UD_LEAD = "lead"
+# Limits to prevent sending garbage / too long
+MAX_USER_TEXT = 4000
+MAX_AI_REPLY = 3500
 
 
-@dataclass
-class Lead:
-    name: str = ""
-    contact: str = ""
-    package: str = ""
-    description: str = ""
-    source: str = ""  # /start payload or other
+# ==========
+# DATA
+# ==========
+@dataclass(frozen=True)
+class Package:
+    code: str
+    title: str
+    price: str
+    bullets: Tuple[str, ...]
 
 
-def _ud_get_lead(user_data: dict) -> Lead:
-    raw = user_data.get(UD_LEAD)
-    if isinstance(raw, Lead):
-        return raw
-    lead = Lead()
-    user_data[UD_LEAD] = lead
-    return lead
+PACKAGES: Tuple[Package, ...] = (
+    Package(
+        code="mini",
+        title="Мини-сайт",
+        price="10 000 ₽",
+        bullets=("Лендинг из 1 экрана", "1 форма", "Адаптивность", "Срок: 2 дня"),
+    ),
+    Package(
+        code="blogger",
+        title="Блогер Старт",
+        price="25 000 ₽",
+        bullets=("Сайт-визитка (4 блока)", "Соцсети", "Простая CMS", "Срок: 4 дня"),
+    ),
+    Package(
+        code="profi",
+        title="Профи",
+        price="50 000 ₽",
+        bullets=("До 6 экранов", "Cal.com", "Бот уведомлений", "Срок: 5–7 дней"),
+    ),
+    Package(
+        code="biz",
+        title="Бизнес-Лендинг",
+        price="75 000 ₽",
+        bullets=("Прототипирование", "A/B структура", "Анимации", "Срок: 7–10 дней"),
+    ),
+    Package(
+        code="shop",
+        title="Магазин",
+        price="100 000 ₽",
+        bullets=("Каталог до 30", "Фильтры", "Оплата", "Срок: 10–14 дней"),
+    ),
+    Package(
+        code="auto",
+        title="Автоматизация",
+        price="125 000 ₽",
+        bullets=("Сайт + бот", "Корзина/оплата в боте", "Триггеры", "Срок: 14–18 дней"),
+    ),
+    Package(
+        code="portfolio",
+        title="Портфолио Pro",
+        price="150 000 ₽",
+        bullets=("Уникальный дизайн", "Фильтры портфолио", "SEO Pro", "Срок: 18–25 дней"),
+    ),
+    Package(
+        code="custom",
+        title="Индивидуальное решение",
+        price="от 200 000 ₽",
+        bullets=("Разработка с нуля", "Интеграции", "Нестандартный функционал", "Срок: от 30 дней"),
+    ),
+)
 
+WELCOME_GREETING = (
+    "Привет! 👋\n"
+    f"Я бот {BRAND_NAME}.\n"
+)
 
-def _ud_set_state(user_data: dict, state: str) -> None:
-    user_data[UD_STATE] = state
+WELCOME_ABOUT = (
+    "Мы делаем:\n"
+    "🟣 сайты под ключ (лендинги/многостраничники/портфолио/магазины)\n"
+    "🔵 Telegram/WhatsApp-ботов (консультации, заявки, оплаты, автоматизация)\n"
+    "⚡ быстро, аккуратно, с фокусом на конверсию и интеграции\n"
+)
 
+WELCOME_MANAGER_LINE = (
+    "Если вы хотите сделать заказ — обратитесь к Менеджеру. 👤"
+)
 
-def _ud_get_state(user_data: dict) -> str:
-    return user_data.get(UD_STATE, S_MENU)
-
-
-def _safe(s: Optional[str]) -> str:
-    return html.escape((s or "").strip())
-
-
-def _parse_start_payload(text: str) -> str:
-    # text: "/start xxx"
-    parts = (text or "").split(maxsplit=1)
-    if len(parts) < 2:
-        return ""
-    payload = parts[1].strip()
-    # payload length is limited by Telegram; keep as-is
-    return payload
-
-
-# =========================
-# INLINE KEYBOARDS
-# =========================
-def kb_menu() -> InlineKeyboardMarkup:
+# ==========
+# UI
+# ==========
+def _keyboard_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("Пакеты", callback_data="NAV:PACKAGES"),
-                InlineKeyboardButton("Оставить заявку", callback_data="LEAD:START"),
+                InlineKeyboardButton("📦 Пакеты и цены", callback_data="menu:packages"),
+                InlineKeyboardButton("🧩 Услуги", callback_data="menu:services"),
             ],
             [
-                InlineKeyboardButton("Как мы работаем", callback_data="NAV:PROCESS"),
-                InlineKeyboardButton("Контакты", callback_data="NAV:CONTACTS"),
+                InlineKeyboardButton("📝 Оставить заявку", callback_data="menu:order"),
+                InlineKeyboardButton("👤 Менеджер", url=BOT_TG_URL),
             ],
         ]
     )
 
 
-def kb_back_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Назад в меню", callback_data="NAV:MENU")]])
-
-
-def kb_cancel() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="LEAD:CANCEL")]])
-
-
-def kb_packages() -> InlineKeyboardMarkup:
+def _keyboard_packages() -> InlineKeyboardMarkup:
     rows = []
-    for name, price in PACKAGES:
-        rows.append([InlineKeyboardButton(f"{name} — {price}", callback_data=f"LEAD:PKG:{name}")])
-    rows.append([InlineKeyboardButton("Назад", callback_data="NAV:MENU")])
+    for p in PACKAGES:
+        rows.append([InlineKeyboardButton(f"{p.title} — {p.price}", callback_data=f"pkg:{p.code}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")])
     return InlineKeyboardMarkup(rows)
 
 
-def kb_confirm() -> InlineKeyboardMarkup:
+def _keyboard_order() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [
-                InlineKeyboardButton("Отправить", callback_data="LEAD:SEND"),
-                InlineKeyboardButton("Отмена", callback_data="LEAD:CANCEL"),
-            ],
-            [InlineKeyboardButton("В меню", callback_data="NAV:MENU")],
+            [InlineKeyboardButton("👤 Написать менеджеру", url=BOT_TG_URL)],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
         ]
     )
 
 
-# =========================
-# RENDER
-# =========================
-def render_menu_text() -> str:
-    return (
-        "<b>VEKTOR Web</b>\n"
-        "Сайты и Telegram-боты под ключ.\n\n"
-        "Выберите действие:"
-    )
-
-
-def render_packages_text() -> str:
-    lines = ["<b>Пакеты</b>\n"]
-    for name, price in PACKAGES:
-        lines.append(f"• <b>{_safe(name)}</b> — {_safe(price)}")
-    lines.append("\nНажмите на пакет, чтобы сразу оформить заявку.")
+# ==========
+# TEXT BUILDERS (HTML-safe)
+# ==========
+def _fmt_packages_block() -> str:
+    lines = ["<b>Прайс по пакетам:</b> 💰", ""]
+    for p in PACKAGES:
+        lines.append(f"• <b>{html.escape(p.title)}</b> — <b>{html.escape(p.price)}</b>")
     return "\n".join(lines)
 
 
-def render_process_text() -> str:
+def _welcome_message() -> str:
+    parts = [
+        html.escape(WELCOME_GREETING).replace("\n", "<br>"),
+        "<br>",
+        html.escape(WELCOME_ABOUT).replace("\n", "<br>"),
+        "<br>",
+        _fmt_packages_block().replace("\n", "<br>"),
+        "<br><br>",
+        html.escape(WELCOME_MANAGER_LINE),
+    ]
+    return "".join(parts)
+
+
+def _services_message() -> str:
     return (
-        "<b>Процесс</b>\n"
-        "1) Заявка\n"
-        "2) Разбор 20 минут\n"
-        "3) Аванс 50% + договор\n"
-        "4) Прототип\n"
-        "5) Разработка\n"
-        "6) Тестирование\n"
-        "7) Запуск\n"
+        "<b>Услуги</b> 🧩<br><br>"
+        "🟣 Сайты: лендинги, многостраничники, портфолио, магазины<br>"
+        "🔵 Боты: Telegram/WhatsApp, заявки, консультации, интеграции, оплаты<br>"
+        "⚙️ Автоматизация: связка сайт + бот + CRM/таблицы/уведомления"
     )
 
 
-def render_contacts_text() -> str:
+def _order_hint() -> str:
     return (
-        "<b>Контакты</b>\n"
-        f"Бот: @{_safe(BOT_USERNAME)}\n"
-        "Email: vectorweb9881@gmail.com\n"
-        "Instagram: @vektor_web"
+        "<b>Заявка</b> 📝<br><br>"
+        "Отправьте одним сообщением:<br>"
+        "1) Имя<br>"
+        "2) Контакт (Telegram/телефон/email)<br>"
+        "3) Пакет (или “не знаю”)<br>"
+        "4) Кратко задачу + сроки<br><br>"
+        "Я передам менеджеру и он свяжется с вами."
     )
 
 
-def render_lead_summary(lead: Lead, user_link: str) -> str:
-    return (
-        "<b>Проверьте заявку</b>\n\n"
-        f"Имя: <b>{_safe(lead.name) or '-'}</b>\n"
-        f"Контакт: <b>{_safe(lead.contact) or '-'}</b>\n"
-        f"Пакет: <b>{_safe(lead.package) or '-'}</b>\n"
-        f"Описание:\n{_safe(lead.description) or '-'}\n\n"
-        f"Пользователь: {user_link}\n"
-        f"Источник: <code>{_safe(lead.source) or '-'}</code>"
-    )
-
-
-def user_tg_link(update: Update) -> str:
-    u = update.effective_user
-    if not u:
-        return "<i>unknown</i>"
-    name = _safe(u.full_name) or "user"
-    return f"<a href='tg://user?id={u.id}'>{name}</a>"
-
-
-# =========================
-# MANAGER NOTIFY
-# =========================
-async def notify_manager(update: Update, context: ContextTypes.DEFAULT_TYPE, lead: Lead) -> None:
+# ==========
+# MANAGER SEND
+# ==========
+async def _send_to_manager(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     if not MANAGER_CHAT_ID:
+        log.warning("MANAGER_CHAT_ID is empty; skipping send to manager.")
         return
 
-    u = update.effective_user
-    uname = f"@{u.username}" if (u and u.username) else ""
-    link = user_tg_link(update)
-
-    text = (
-        "<b>Новая заявка</b>\n\n"
-        f"Имя: <b>{_safe(lead.name) or '-'}</b>\n"
-        f"Контакт: <b>{_safe(lead.contact) or '-'}</b>\n"
-        f"Пакет: <b>{_safe(lead.package) or '-'}</b>\n"
-        f"Описание:\n{_safe(lead.description) or '-'}\n\n"
-        f"Пользователь: {link} {_safe(uname)}\n"
-        f"Источник: <code>{_safe(lead.source) or '-'}</code>"
-    )
-
-    kwargs = {}
-    if MANAGER_THREAD_ID:
-        try:
-            kwargs["message_thread_id"] = int(MANAGER_THREAD_ID)
-        except Exception:
-            pass
+    try:
+        chat_id = int(MANAGER_CHAT_ID)
+    except ValueError:
+        log.error("MANAGER_CHAT_ID must be numeric chat id. Current: %r", MANAGER_CHAT_ID)
+        return
 
     await context.bot.send_message(
-        chat_id=int(MANAGER_CHAT_ID),
+        chat_id=chat_id,
         text=text,
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
-        **kwargs,
     )
 
 
-# =========================
-# FLOW CORE
-# =========================
-def reset_flow(user_data: dict) -> None:
-    user_data[UD_LEAD] = Lead()
-    _ud_set_state(user_data, S_MENU)
+def _compact_user(update: Update) -> str:
+    u = update.effective_user
+    if not u:
+        return "unknown-user"
+    uname = f"@{u.username}" if u.username else ""
+    full = " ".join([x for x in [u.first_name, u.last_name] if x]).strip()
+    bits = [str(u.id)]
+    if full:
+        bits.append(full)
+    if uname:
+        bits.append(uname)
+    return " | ".join(bits)
 
 
-async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
-    text = render_menu_text()
-    if edit and update.callback_query:
-        await update.callback_query.edit_message_text(
-            text=text, reply_markup=kb_menu(), parse_mode=ParseMode.HTML
-        )
-        return
-    if update.message:
-        await update.message.reply_text(text=text, reply_markup=kb_menu(), parse_mode=ParseMode.HTML)
+# ==========
+# AI (optional)
+# ==========
+async def call_ai(user_text: str) -> str:
+    """
+    Plug your OpenRouter client here if you already have one.
+    This stub avoids crashes and returns a safe fallback.
+    """
+    # If you have an existing module: from .openrouter_client import ask
+    # return await ask(user_text=user_text)
+
+    # Safe fallback (no symbols, no binary)
+    return (
+        "Принял. Уточните, пожалуйста, нишу, цель сайта/бота и желаемый срок — "
+        "и я предложу оптимальный пакет и следующий шаг."
+    )
 
 
-async def start_lead(update: Update, context: ContextTypes.DEFAULT_TYPE, *, preset_package: str = "") -> None:
-    lead = _ud_get_lead(context.user_data)
-    if preset_package:
-        lead.package = preset_package
-
-    _ud_set_state(context.user_data, S_LEAD_NAME)
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text="Введите имя:", reply_markup=kb_cancel(), parse_mode=ParseMode.HTML
-        )
-    elif update.message:
-        await update.message.reply_text("Введите имя:", reply_markup=kb_cancel(), parse_mode=ParseMode.HTML)
-
-
-async def finalize_lead(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    lead = _ud_get_lead(context.user_data)
-
-    # 1) Ответ клиенту (одно сообщение, без мусора)
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text=(
-                "Принято.\n"
-                "Заявка передана менеджеру.\n"
-                "В ближайшее время с вами свяжутся."
-            ),
-            reply_markup=kb_menu(),
-            parse_mode=ParseMode.HTML,
-        )
-    elif update.message:
-        await update.message.reply_text(
-            text=(
-                "Принято.\n"
-                "Заявка передана менеджеру.\n"
-                "В ближайшее время с вами свяжутся."
-            ),
-            reply_markup=kb_menu(),
-            parse_mode=ParseMode.HTML,
-        )
-
-    # 2) Уведомление менеджеру
-    await notify_manager(update, context, lead)
-
-    # 3) Reset
-    reset_flow(context.user_data)
-
-
-# =========================
-# PUBLIC HANDLERS
-# =========================
+# ==========
+# COMMANDS
+# ==========
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    reset_flow(context.user_data)
+    """
+    /start
+    Sends a structured welcome message + packages + manager line (with emojis).
+    """
+    if not update.message:
+        return
 
-    payload = _parse_start_payload(update.message.text if update.message else "")
-    lead = _ud_get_lead(context.user_data)
-    lead.source = payload or "start"
+    # Clear state on new start
+    context.user_data.clear()
+    context.user_data["state"] = "home"
+    context.user_data["started_at"] = datetime.now(timezone.utc).isoformat()
 
-    await show_menu(update, context, edit=False)
+    await update.message.reply_text(
+        _welcome_message(),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        reply_markup=_keyboard_main(),
+    )
 
 
 async def cmd_packages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    _ud_set_state(context.user_data, S_MENU)
-    if update.message:
-        await update.message.reply_text(
-            text=render_packages_text(),
-            reply_markup=kb_packages(),
-            parse_mode=ParseMode.HTML,
-        )
+    if not update.message:
+        return
+    context.user_data["state"] = "packages"
+    await update.message.reply_text(
+        "<b>Пакеты и цены</b> 📦",
+        parse_mode=ParseMode.HTML,
+        reply_markup=_keyboard_packages(),
+    )
 
 
+# ==========
+# CALLBACKS
+# ==========
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not q:
         return
-    await q.answer()
 
     data = q.data or ""
+    await q.answer()
 
-    # NAV
-    if data == "NAV:MENU":
-        reset_flow(context.user_data)
-        await show_menu(update, context, edit=True)
-        return
-
-    if data == "NAV:PACKAGES":
-        _ud_set_state(context.user_data, S_MENU)
+    if data == "menu:home":
+        context.user_data["state"] = "home"
         await q.edit_message_text(
-            text=render_packages_text(),
-            reply_markup=kb_packages(),
+            _welcome_message(),
             parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=_keyboard_main(),
         )
         return
 
-    if data == "NAV:PROCESS":
-        _ud_set_state(context.user_data, S_MENU)
+    if data == "menu:packages":
+        context.user_data["state"] = "packages"
         await q.edit_message_text(
-            text=render_process_text(),
-            reply_markup=kb_back_menu(),
+            "<b>Пакеты и цены</b> 📦",
             parse_mode=ParseMode.HTML,
+            reply_markup=_keyboard_packages(),
         )
         return
 
-    if data == "NAV:CONTACTS":
-        _ud_set_state(context.user_data, S_MENU)
-        await q.edit_message_text(
-            text=render_contacts_text(),
-            reply_markup=kb_back_menu(),
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
-    # LEAD
-    if data == "LEAD:CANCEL":
-        reset_flow(context.user_data)
-        await q.edit_message_text(
-            text="Отменено. В меню:",
-            reply_markup=kb_menu(),
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
-    if data == "LEAD:START":
-        lead = _ud_get_lead(context.user_data)
-        if not lead.source:
-            lead.source = "button"
-        await start_lead(update, context, preset_package="")
-        return
-
-    if data.startswith("LEAD:PKG:"):
-        pkg = data.split("LEAD:PKG:", 1)[1].strip()
-        lead = _ud_get_lead(context.user_data)
-        lead.package = pkg
-        if not lead.source:
-            lead.source = "packages"
-        await start_lead(update, context, preset_package=pkg)
-        return
-
-    if data == "LEAD:SEND":
-        st = _ud_get_state(context.user_data)
-        if st != S_LEAD_CONFIRM:
-            # Если кто-то нажал "Отправить" вне подтверждения — просто меню.
-            reset_flow(context.user_data)
-            await show_menu(update, context, edit=True)
+    if data.startswith("pkg:"):
+        code = data.split(":", 1)[1]
+        pkg = next((p for p in PACKAGES if p.code == code), None)
+        if not pkg:
+            await q.edit_message_text(
+                "Пакет не найден.",
+                reply_markup=_keyboard_packages(),
+            )
             return
-        await finalize_lead(update, context)
+
+        context.user_data["selected_package"] = pkg.title
+        context.user_data["state"] = "order"
+
+        bullets = "<br>".join([f"• {html.escape(b)}" for b in pkg.bullets])
+        msg = (
+            f"<b>{html.escape(pkg.title)}</b> — <b>{html.escape(pkg.price)}</b> ✅<br><br>"
+            f"{bullets}<br><br>"
+            "Чтобы оформить заказ, отправьте данные одним сообщением (имя, контакт, задача, сроки)."
+        )
+        await q.edit_message_text(
+            msg,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=_keyboard_order(),
+        )
         return
 
-    # Default
-    reset_flow(context.user_data)
-    await show_menu(update, context, edit=True)
+    if data == "menu:services":
+        context.user_data["state"] = "services"
+        await q.edit_message_text(
+            _services_message(),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")]]),
+        )
+        return
+
+    if data == "menu:order":
+        context.user_data["state"] = "order"
+        await q.edit_message_text(
+            _order_hint(),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=_keyboard_order(),
+        )
+        return
 
 
-def accept_contact(text: str) -> str:
-    """
-    Нормализация контакта.
-    Убирает лишние пробелы, поддерживает @username/телефон/email в одном поле.
-    """
-    s = (text or "").strip()
-    s = " ".join(s.split())
-    return s
+# ==========
+# TEXT HANDLER
+# ==========
+def _sanitize_text(text: str) -> str:
+    text = text.replace("\x00", "").strip()
+    # remove control chars except newline/tab
+    text = re.sub(r"[\x01-\x08\x0B\x0C\x0E-\x1F\x7F]", "", text)
+    if len(text) > MAX_USER_TEXT:
+        text = text[:MAX_USER_TEXT]
+    return text
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = update.message
-    if not msg:
+    """
+    Main text router.
+    - In "order" state: treat incoming message as lead and forward to manager.
+    - Otherwise: optional AI response (safe fallback if AI not wired).
+    """
+    if not update.message or update.message.text is None:
         return
 
-    lead = _ud_get_lead(context.user_data)
-    state = _ud_get_state(context.user_data)
-
-    # Если пользователь прислал контакт объектом Telegram
-    if msg.contact and state in (S_LEAD_CONTACT,):
-        phone = msg.contact.phone_number or ""
-        text = accept_contact(phone)
-    else:
-        text = accept_contact(msg.text or "")
-
-    if state == S_LEAD_NAME:
-        lead.name = text
-        _ud_set_state(context.user_data, S_LEAD_CONTACT)
-        await msg.reply_text("Введите контакт (Telegram @username / телефон / email):", reply_markup=kb_cancel())
+    user_text = _sanitize_text(update.message.text)
+    if not user_text:
         return
 
-    if state == S_LEAD_CONTACT:
-        lead.contact = text
-        _ud_set_state(context.user_data, S_LEAD_PACKAGE)
+    state = (context.user_data.get("state") or "home").strip()
+    selected_pkg = (context.user_data.get("selected_package") or "").strip()
 
-        # Если пакет уже выбран с сайта/кнопок — пропускаем выбор
-        if lead.package:
-            _ud_set_state(context.user_data, S_LEAD_DESC)
-            await msg.reply_text("Кратко опишите задачу:", reply_markup=kb_cancel())
-            return
+    if state == "order":
+        lead = {
+            "user": _compact_user(update),
+            "selected_package": selected_pkg or "—",
+            "text": user_text,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
 
-        await msg.reply_text(
-            "Выберите пакет кнопкой ниже:",
-            reply_markup=kb_packages(),
-            parse_mode=ParseMode.HTML,
+        manager_msg = (
+            "<b>Новая заявка</b> 🧾<br>"
+            f"<b>Пользователь:</b> {html.escape(lead['user'])}<br>"
+            f"<b>Пакет:</b> {html.escape(lead['selected_package'])}<br>"
+            f"<b>Сообщение:</b><br>{html.escape(lead['text']).replace(chr(10), '<br>')}<br><br>"
+            f"<i>raw:</i> {html.escape(json.dumps(lead, ensure_ascii=False))}"
         )
+        await _send_to_manager(context, manager_msg)
+
+        await update.message.reply_text(
+            "Принято ✅\nМенеджер свяжется с вами.",
+            reply_markup=_keyboard_main(),
+        )
+        context.user_data["state"] = "home"
         return
 
-    if state == S_LEAD_DESC:
-        lead.description = text
-        _ud_set_state(context.user_data, S_LEAD_CONFIRM)
+    # Non-order: consult mode
+    if AI_ENABLED:
+        ai_text = await call_ai(user_text)
+    else:
+        ai_text = "Принято."
 
-        summary = render_lead_summary(lead, user_tg_link(update))
-        await msg.reply_text(summary, reply_markup=kb_confirm(), parse_mode=ParseMode.HTML)
+    ai_text = _sanitize_text(ai_text)
+    if len(ai_text) > MAX_AI_REPLY:
+        ai_text = ai_text[:MAX_AI_REPLY]
+
+    await update.message.reply_text(ai_text, disable_web_page_preview=True)
+
+
+# ==========
+# OPTIONAL: CONTACT ACCEPTOR (fixed)
+# ==========
+async def accept_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    If you later add a contact request button, this handler will accept it safely.
+    Fixes the SyntaxError you had: no broken parentheses, no partial identifiers.
+    """
+    if not update.message or not update.message.contact:
         return
 
-    # Любой текст вне формы -> меню (без мусора)
-    reset_flow(context.user_data)
-    await msg.reply_text(render_menu_text(), reply_markup=kb_menu(), parse_mode=ParseMode.HTML)
+    c = update.message.contact
+    phone = (c.phone_number or "").strip()
+    first = (c.first_name or "").strip()
+    last = (c.last_name or "").strip()
+
+    msg = (
+        "<b>Контакт получен</b> 📇<br>"
+        f"<b>Пользователь:</b> {html.escape(_compact_user(update))}<br>"
+        f"<b>Имя:</b> {html.escape(' '.join([first, last]).strip() or '—')}<br>"
+        f"<b>Телефон:</b> {html.escape(phone or '—')}"
+    )
+    await _send_to_manager(context, msg)
+
+    await update.message.reply_text("Контакт принят ✅", reply_markup=_keyboard_main())
