@@ -13,12 +13,7 @@ class Config:
     OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
     OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-    # Rate-limit storage
-    REDIS_URL = os.getenv("REDIS_URL")  # e.g. redis://:pass@host:6379/0
-
-    # Lead cooldown (seconds)
     LEAD_COOLDOWN_SECONDS = int(os.getenv("LEAD_COOLDOWN_SECONDS", "86400"))
-
     SUPPORT_TG = os.getenv("SUPPORT_TG", "@bloknotpr")
 
     @classmethod
