@@ -27,6 +27,7 @@ from .ui import (
     remove_reply_kb,
 )
 from .openrouter import ask_openrouter
+from .ratelimit import check_lead_allowed, mark_lead_submitted, human_left
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +41,19 @@ async def _notify_manager(context: ContextTypes.DEFAULT_TYPE, text: str):
     chat_id = _manager_chat_id()
     if not chat_id:
         return
-    try:
-        await context.bot.send_message(chat_id=chat_id, text=text)
-    except Exception as e:
-        logger.error(f"Manager notify failed: {e}")
+    await context.bot.send_message(chat_id=chat_id, text=text)
 
 def _user_label(user) -> str:
     return f"@{user.username}" if user.username else f"ID:{user.id}"
+
+async def _blocked_lead_reply(update_or_query_message, seconds_left: int):
+    t = human_left(seconds_left)
+    txt = (
+        "Вы уже оставляли заявку.\n\n"
+        f"Повторно можно через {t} или через поддержку: {config.SUPPORT_TG}"
+    )
+    await update_or_query_message.reply_text(txt, reply_markup=menu_kb())
+    await update_or_query_message.reply_text(" ", reply_markup=remove_reply_kb())
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reset(context.user_data)
@@ -79,6 +86,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "NAV:CONSULT":
+        allowed, left = await check_lead_allowed(user.id)
+        if not allowed:
+            await _blocked_lead_reply(q.message, left)
+            await q.answer()
+            return
+
         start_consult(context.user_data)
         await q.message.reply_text(
             "Опишите проект одним сообщением (что нужно сделать, примеры, сроки).",
@@ -110,24 +123,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "LEAD:ORDER":
+        allowed, left = await check_lead_allowed(user.id)
+        if not allowed:
+            await _blocked_lead_reply(q.message, left)
+            await q.answer()
+            return
+
         ctx = get_ctx(context.user_data)
         if not ctx.package_name:
             await q.answer("Сначала выберите пакет")
             return
 
         selected_package = ctx.package_name
-
-        # уведомление менеджеру сразу при старте оформления
-        await _notify_manager(
-            context,
-            "\n".join([
-                "🧾 Новая заявка (старт оформления пакета)",
-                f"👤 { _user_label(user) }",
-                f"📦 Пакет: {selected_package}",
-                "⏳ Ожидаем ТЗ и контакт",
-            ])
-        )
-
         start_order(context.user_data, selected_package)
 
         await q.message.reply_text(
@@ -181,26 +188,36 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if state == State.LEAD_CONTACT:
         accept_contact(context.user_data, text)
 
-        # Финал клиенту + меню под сообщением
+        # клиенту
         await update.message.reply_text(FINAL_TEXT, reply_markup=menu_kb())
         await update.message.reply_text(" ", reply_markup=remove_reply_kb())
 
-        # Уведомление менеджеру: полный бриф
-        ctx = get_ctx(context.user_data)
-        await _notify_manager(
-            context,
-            "\n".join([
-                "🧾 Новая заявка (полные данные)",
-                f"👤 { _user_label(user) }",
-                f"📦 Пакет: {ctx.package_name or 'не выбран (консультация)'}",
-                f"📝 ТЗ: {ctx.tz or ''}",
-                f"📞 Контакт: {ctx.contact or ''}",
-            ])
-        )
+        # менеджеру (если задан)
+        if _manager_chat_id():
+            try:
+                ctx = get_ctx(context.user_data)
+                package = ctx.package_name or "не выбран (консультация)"
+                tz = ctx.tz or ""
+                contact = ctx.contact or ""
+
+                msg = "\n".join([
+                    "🧾 Новая заявка",
+                    f"👤 {_user_label(user)}",
+                    f"📦 Пакет: {package}",
+                    f"📝 ТЗ: {tz}",
+                    f"📞 Контакт: {contact}",
+                ])
+                await _notify_manager(context, msg)
+
+                # ставим блокировку на 24ч только после успешной передачи менеджеру
+                await mark_lead_submitted(user.id)
+
+            except Exception as e:
+                logger.error(f"Manager notify failed: {e}")
 
         reset(context.user_data)
         return
 
-    # Обычный режим
+    # обычный режим (вопросы)
     resp = await ask_openrouter(text)
     await update.message.reply_text(resp, reply_markup=remove_reply_kb())
