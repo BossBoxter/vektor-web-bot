@@ -78,12 +78,14 @@ def menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📦 Пакеты", callback_data="NAV:PACKAGES")],
         [InlineKeyboardButton("📝 Бесплатная консультация", callback_data="NAV:CONSULT")],
         [InlineKeyboardButton("ℹ️ Как мы работаем?", callback_data="NAV:HOW")],
+        [InlineKeyboardButton("🆘 Поддержка", url="https://t.me/bloknotpr")],
     ])
 
 def how_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏠 Меню", callback_data="NAV:MENU")],
         [InlineKeyboardButton("📦 Пакеты", callback_data="NAV:PACKAGES")],
+        [InlineKeyboardButton("🆘 Поддержка", url="https://t.me/bloknotpr")],
     ])
 
 def packages_kb() -> InlineKeyboardMarkup:
@@ -96,12 +98,14 @@ def package_details_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("✅ Оформить заказ", callback_data="LEAD:ORDER")],
         [InlineKeyboardButton("⬅️ Назад к пакетам", callback_data="NAV:PACKAGES")],
         [InlineKeyboardButton("🏠 Меню", callback_data="NAV:MENU")],
+        [InlineKeyboardButton("🆘 Поддержка", url="https://t.me/bloknotpr")],
     ])
 
 def lead_cancel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("❌ Отмена", callback_data="LEAD:CANCEL")],
         [InlineKeyboardButton("🏠 Меню", callback_data="NAV:MENU")],
+        [InlineKeyboardButton("🆘 Поддержка", url="https://t.me/bloknotpr")],
     ])
 
 def contacts_reply_kb(username: str | None, user_id: int) -> ReplyKeyboardMarkup:
