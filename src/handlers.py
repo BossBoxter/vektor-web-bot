@@ -25,7 +25,7 @@ from .ui import (
     lead_cancel_kb,
     contacts_reply_kb,
     remove_reply_kb,
-    render_package_text,  # FIX: импорт рендера текста пакета
+    render_package_text,
 )
 from .openrouter import ask_openrouter
 from .ratelimit import check_lead_allowed, mark_lead_submitted, human_left
@@ -58,6 +58,39 @@ async def _blocked_lead_reply(message, seconds_left: int):
     )
     await message.reply_text(txt, reply_markup=menu_kb())
     await message.reply_text(" ", reply_markup=remove_reply_kb())
+
+async def _finalize_and_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    ЕДИНАЯ точка финала:
+    - отправляет FINAL_TEXT клиенту
+    - всегда пытается уведомить менеджера
+    - ставит блокировку на 24ч
+    - сбрасывает состояние
+    """
+    user = update.effective_user
+    ctx = get_ctx(context.user_data)
+
+    # 1) Клиенту (всегда)
+    await update.effective_message.reply_text(FINAL_TEXT, reply_markup=menu_kb())
+    await update.effective_message.reply_text(" ", reply_markup=remove_reply_kb())
+
+    # 2) Менеджеру (всегда пытаемся)
+    await _notify_manager(
+        context,
+        "\n".join([
+            "🧾 Новая заявка",
+            f"👤 {_user_label(user)}",
+            f"📦 Пакет: {ctx.package_name or 'не выбран (консультация)'}",
+            f"📝 ТЗ: {ctx.tz or ''}",
+            f"📞 Контакт: {ctx.contact or ''}",
+        ])
+    )
+
+    # 3) Блокировка на 24ч (фиксируем факт записи)
+    await mark_lead_submitted(user.id)
+
+    # 4) Сброс
+    reset(context.user_data)
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reset(context.user_data)
@@ -113,7 +146,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ctx = get_ctx(context.user_data)
         ctx.package_name = name
 
-        # FIX: используем новый информативный рендер из ui.py
         text = render_package_text(name)
 
         await q.message.edit_text(text, parse_mode="HTML", reply_markup=package_details_kb())
@@ -181,25 +213,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if state == State.LEAD_CONTACT:
         accept_contact(context.user_data, text)
 
-        await update.message.reply_text(FINAL_TEXT, reply_markup=menu_kb())
-        await update.message.reply_text(" ", reply_markup=remove_reply_kb())
-
-        ctx = get_ctx(context.user_data)
-        await _notify_manager(
-            context,
-            "\n".join([
-                "🧾 Новая заявка",
-                f"👤 {_user_label(user)}",
-                f"📦 Пакет: {ctx.package_name or 'не выбран (консультация)'}",
-                f"📝 ТЗ: {ctx.tz or ''}",
-                f"📞 Контакт: {ctx.contact or ''}",
-            ])
-        )
-
-        # блокируем повторную запись на 24ч
-        await mark_lead_submitted(user.id)
-
-        reset(context.user_data)
+        # ВАЖНО: теперь финал всегда = уведомление менеджеру
+        await _finalize_and_notify(update, context)
         return
 
     resp = await ask_openrouter(text)
