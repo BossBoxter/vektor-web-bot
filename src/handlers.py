@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reset(context.user_data)
     await update.message.reply_text(menu_text(), reply_markup=menu_kb())
-    # убираем любую reply-клавиатуру под строкой ввода
     await update.message.reply_text(" ", reply_markup=remove_reply_kb())
 
 async def cmd_packages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -42,7 +41,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
 
-    # Навигация
     if data == "NAV:MENU":
         reset(context.user_data)
         await q.message.edit_text(menu_text(), reply_markup=menu_kb())
@@ -56,11 +54,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "NAV:CONSULT":
         start_consult(context.user_data)
-        await q.message.reply_text("Опишите проект одним сообщением (что нужно сделать, примеры, сроки).", reply_markup=lead_cancel_kb())
+        await q.message.reply_text(
+            "Опишите проект одним сообщением (что нужно сделать, примеры, сроки).",
+            reply_markup=lead_cancel_kb(),
+        )
         await q.answer()
         return
 
-    # Выбор пакета
     if data.startswith("PKG:"):
         name = data.replace("PKG:", "", 1)
         if name not in PACKAGES:
@@ -83,20 +83,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         return
 
-    # Лид-флоу
     if data == "LEAD:ORDER":
         ctx = get_ctx(context.user_data)
         if not ctx.package_name:
             await q.answer("Сначала выберите пакет")
             return
         start_order(context.user_data, ctx.package_name)
-        await q.message.reply_text(f"Заявка на пакет: {ctx.package_name}\n\nНапишите ТЗ одним сообщением.", reply_markup=lead_cancel_kb())
+        await q.message.reply_text(
+            f"Заявка на пакет: {ctx.package_name}\n\nНапишите ТЗ одним сообщением.",
+            reply_markup=lead_cancel_kb(),
+        )
         await q.answer()
         return
 
     if data == "LEAD:CANCEL":
         reset(context.user_data)
-        await q.message.reply_text("Отменено.", reply_markup=remove_reply_kb())
+        await q.message.reply_text("Отменено.", reply_markup=menu_kb())
+        await q.message.reply_text(" ", reply_markup=remove_reply_kb())
         await q.answer()
         return
 
@@ -106,21 +109,19 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = (update.message.text or "").strip()
 
-    # Сценарные reply-кнопки (назад/отмена)
     if text == "❌ Отмена":
         reset(context.user_data)
-        await update.message.reply_text("Отменено.", reply_markup=remove_reply_kb())
+        await update.message.reply_text("Отменено.", reply_markup=menu_kb())
+        await update.message.reply_text(" ", reply_markup=remove_reply_kb())
         return
 
     state = get_state(context.user_data)
 
     if text == "⬅️ Назад" and state == State.LEAD_CONTACT:
-        # вернуться к ТЗ
         context.user_data["state"] = State.LEAD_TZ.value
         await update.message.reply_text("Ок. Снова напишите ТЗ одним сообщением.", reply_markup=remove_reply_kb())
         return
 
-    # FSM
     if state == State.LEAD_TZ:
         accept_tz(context.user_data, text)
         msg = (
@@ -139,9 +140,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if state == State.LEAD_CONTACT:
         accept_contact(context.user_data, text)
 
-        await update.message.reply_text(FINAL_TEXT, reply_markup=remove_reply_kb())
+        # 1) Финал
+        await update.message.reply_text(FINAL_TEXT, reply_markup=menu_kb())
+        # 2) Убираем reply-клавиатуру под строкой ввода, чтобы не мешала
+        await update.message.reply_text(" ", reply_markup=remove_reply_kb())
 
-        # уведомление менеджеру (если задан)
+        # Уведомление менеджеру
         if config.MANAGER_CHAT_ID:
             try:
                 ctx = get_ctx(context.user_data)
@@ -160,10 +164,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Manager notify failed: {e}")
 
-        # после завершения очищаем контекст (но уже после отправки менеджеру)
         reset(context.user_data)
         return
 
-    # Обычный режим: если пользователь пишет “вопросы”
     resp = await ask_openrouter(text)
     await update.message.reply_text(resp, reply_markup=remove_reply_kb())
