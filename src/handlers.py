@@ -18,6 +18,8 @@ from .ui import (
     FINAL_TEXT,
     menu_text,
     menu_kb,
+    how_text,
+    how_kb,
     packages_kb,
     package_details_kb,
     lead_cancel_kb,
@@ -27,6 +29,24 @@ from .ui import (
 from .openrouter import ask_openrouter
 
 logger = logging.getLogger(__name__)
+
+def _manager_chat_id() -> int | None:
+    try:
+        return int(config.MANAGER_CHAT_ID) if config.MANAGER_CHAT_ID else None
+    except Exception:
+        return None
+
+async def _notify_manager(context: ContextTypes.DEFAULT_TYPE, text: str):
+    chat_id = _manager_chat_id()
+    if not chat_id:
+        return
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=text)
+    except Exception as e:
+        logger.error(f"Manager notify failed: {e}")
+
+def _user_label(user) -> str:
+    return f"@{user.username}" if user.username else f"ID:{user.id}"
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reset(context.user_data)
@@ -40,6 +60,7 @@ async def cmd_packages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
+    user = update.effective_user
 
     if data == "NAV:MENU":
         reset(context.user_data)
@@ -49,6 +70,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "NAV:PACKAGES":
         await q.message.edit_text("Выберите пакет:", reply_markup=packages_kb())
+        await q.answer()
+        return
+
+    if data == "NAV:HOW":
+        await q.message.edit_text(how_text(), reply_markup=how_kb())
         await q.answer()
         return
 
@@ -88,9 +114,24 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not ctx.package_name:
             await q.answer("Сначала выберите пакет")
             return
-        start_order(context.user_data, ctx.package_name)
+
+        selected_package = ctx.package_name
+
+        # уведомление менеджеру сразу при старте оформления
+        await _notify_manager(
+            context,
+            "\n".join([
+                "🧾 Новая заявка (старт оформления пакета)",
+                f"👤 { _user_label(user) }",
+                f"📦 Пакет: {selected_package}",
+                "⏳ Ожидаем ТЗ и контакт",
+            ])
+        )
+
+        start_order(context.user_data, selected_package)
+
         await q.message.reply_text(
-            f"Заявка на пакет: {ctx.package_name}\n\nНапишите ТЗ одним сообщением.",
+            f"Заявка на пакет: {selected_package}\n\nНапишите ТЗ одним сообщением.",
             reply_markup=lead_cancel_kb(),
         )
         await q.answer()
@@ -140,32 +181,26 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if state == State.LEAD_CONTACT:
         accept_contact(context.user_data, text)
 
-        # 1) Финал
+        # Финал клиенту + меню под сообщением
         await update.message.reply_text(FINAL_TEXT, reply_markup=menu_kb())
-        # 2) Убираем reply-клавиатуру под строкой ввода, чтобы не мешала
         await update.message.reply_text(" ", reply_markup=remove_reply_kb())
 
-        # Уведомление менеджеру
-        if config.MANAGER_CHAT_ID:
-            try:
-                ctx = get_ctx(context.user_data)
-                package = ctx.package_name
-                tz = ctx.tz
-                contact = ctx.contact
-
-                lines = ["🧾 Новая заявка"]
-                lines.append(f"👤 @{user.username}" if user.username else f"👤 ID: {user.id}")
-                if package:
-                    lines.append(f"📦 Пакет: {package}")
-                lines.append(f"📝 ТЗ: {tz}")
-                lines.append(f"📞 Контакт: {contact}")
-
-                await context.bot.send_message(chat_id=int(config.MANAGER_CHAT_ID), text="\n".join(lines))
-            except Exception as e:
-                logger.error(f"Manager notify failed: {e}")
+        # Уведомление менеджеру: полный бриф
+        ctx = get_ctx(context.user_data)
+        await _notify_manager(
+            context,
+            "\n".join([
+                "🧾 Новая заявка (полные данные)",
+                f"👤 { _user_label(user) }",
+                f"📦 Пакет: {ctx.package_name or 'не выбран (консультация)'}",
+                f"📝 ТЗ: {ctx.tz or ''}",
+                f"📞 Контакт: {ctx.contact or ''}",
+            ])
+        )
 
         reset(context.user_data)
         return
 
+    # Обычный режим
     resp = await ask_openrouter(text)
     await update.message.reply_text(resp, reply_markup=remove_reply_kb())
