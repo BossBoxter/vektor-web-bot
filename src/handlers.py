@@ -41,19 +41,22 @@ async def _notify_manager(context: ContextTypes.DEFAULT_TYPE, text: str):
     chat_id = _manager_chat_id()
     if not chat_id:
         return
-    await context.bot.send_message(chat_id=chat_id, text=text)
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=text)
+    except Exception as e:
+        logger.error(f"Manager notify failed: {e}")
 
 def _user_label(user) -> str:
     return f"@{user.username}" if user.username else f"ID:{user.id}"
 
-async def _blocked_lead_reply(update_or_query_message, seconds_left: int):
+async def _blocked_lead_reply(message, seconds_left: int):
     t = human_left(seconds_left)
     txt = (
         "Вы уже оставляли заявку.\n\n"
         f"Повторно можно через {t} или через поддержку: {config.SUPPORT_TG}"
     )
-    await update_or_query_message.reply_text(txt, reply_markup=menu_kb())
-    await update_or_query_message.reply_text(" ", reply_markup=remove_reply_kb())
+    await message.reply_text(txt, reply_markup=menu_kb())
+    await message.reply_text(" ", reply_markup=remove_reply_kb())
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reset(context.user_data)
@@ -134,11 +137,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Сначала выберите пакет")
             return
 
-        selected_package = ctx.package_name
-        start_order(context.user_data, selected_package)
-
+        start_order(context.user_data, ctx.package_name)
         await q.message.reply_text(
-            f"Заявка на пакет: {selected_package}\n\nНапишите ТЗ одним сообщением.",
+            f"Заявка на пакет: {ctx.package_name}\n\nНапишите ТЗ одним сообщением.",
             reply_markup=lead_cancel_kb(),
         )
         await q.answer()
@@ -179,45 +180,32 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• или телефон\n"
             "• или email"
         )
-        await update.message.reply_text(
-            msg,
-            reply_markup=contacts_reply_kb(user.username, user.id),
-        )
+        await update.message.reply_text(msg, reply_markup=contacts_reply_kb(user.username, user.id))
         return
 
     if state == State.LEAD_CONTACT:
         accept_contact(context.user_data, text)
 
-        # клиенту
         await update.message.reply_text(FINAL_TEXT, reply_markup=menu_kb())
         await update.message.reply_text(" ", reply_markup=remove_reply_kb())
 
-        # менеджеру (если задан)
-        if _manager_chat_id():
-            try:
-                ctx = get_ctx(context.user_data)
-                package = ctx.package_name or "не выбран (консультация)"
-                tz = ctx.tz or ""
-                contact = ctx.contact or ""
+        ctx = get_ctx(context.user_data)
+        await _notify_manager(
+            context,
+            "\n".join([
+                "🧾 Новая заявка",
+                f"👤 {_user_label(user)}",
+                f"📦 Пакет: {ctx.package_name or 'не выбран (консультация)'}",
+                f"📝 ТЗ: {ctx.tz or ''}",
+                f"📞 Контакт: {ctx.contact or ''}",
+            ])
+        )
 
-                msg = "\n".join([
-                    "🧾 Новая заявка",
-                    f"👤 {_user_label(user)}",
-                    f"📦 Пакет: {package}",
-                    f"📝 ТЗ: {tz}",
-                    f"📞 Контакт: {contact}",
-                ])
-                await _notify_manager(context, msg)
-
-                # ставим блокировку на 24ч только после успешной передачи менеджеру
-                await mark_lead_submitted(user.id)
-
-            except Exception as e:
-                logger.error(f"Manager notify failed: {e}")
+        # блокируем повторную запись на 24ч
+        await mark_lead_submitted(user.id)
 
         reset(context.user_data)
         return
 
-    # обычный режим (вопросы)
     resp = await ask_openrouter(text)
     await update.message.reply_text(resp, reply_markup=remove_reply_kb())
