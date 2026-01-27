@@ -41,10 +41,7 @@ def _manager_chat_id() -> int | None:
         return None
 
 
-async def _notify_manager(context: ContextTypes.DEFAULT_TYPE, text: str):
-    """
-    Отправляет менеджеру уведомление, если MANAGER_CHAT_ID задан.
-    """
+async def _notify_manager(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     chat_id = _manager_chat_id()
     if not chat_id:
         return
@@ -55,37 +52,36 @@ async def _notify_manager(context: ContextTypes.DEFAULT_TYPE, text: str):
 
 
 def _user_label(user) -> str:
-    return f"@{user.username}" if user.username else f"ID:{user.id}"
+    return f"@{user.username}" if getattr(user, "username", None) else f"ID:{user.id}"
 
 
-async def _blocked_lead_reply(message, seconds_left: int):
+async def _blocked_lead_reply(message, seconds_left: int) -> None:
     t = human_left(seconds_left)
     txt = (
         "Вы уже оставляли заявку.\n\n"
         f"Повторно можно через {t} или через поддержку: {config.SUPPORT_TG}"
     )
     await message.reply_text(txt, reply_markup=menu_kb())
-    # IMPORTANT FIX: PTB не принимает пробел как текст. Убираем клавиатуру корректно.
+    # PTB не принимает пробел как текст. Используем точку.
     await message.reply_text(".", reply_markup=remove_reply_kb())
 
 
-async def _finalize_and_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _finalize_and_notify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    ЕДИНАЯ точка финала:
+    Единая точка финала:
     - отправляет FINAL_TEXT клиенту
-    - всегда пытается уведомить менеджера
+    - уведомляет менеджера
     - ставит блокировку на 24ч
     - сбрасывает состояние
     """
     user = update.effective_user
     ctx = get_ctx(context.user_data)
 
-    # 1) Клиенту (всегда)
+    # Клиенту
     await update.effective_message.reply_text(FINAL_TEXT, reply_markup=menu_kb())
-    # IMPORTANT FIX: PTB не принимает пробел как текст. Убираем клавиатуру корректно.
     await update.effective_message.reply_text(".", reply_markup=remove_reply_kb())
 
-    # 2) Менеджеру (всегда пытаемся)
+    # Менеджеру
     await _notify_manager(
         context,
         "\n".join(
@@ -99,25 +95,21 @@ async def _finalize_and_notify(update: Update, context: ContextTypes.DEFAULT_TYP
         ),
     )
 
-    # 3) Блокировка на 24ч (фиксируем факт записи)
+    # Rate-limit / блокировка
     await mark_lead_submitted(user.id)
 
-    # 4) Сброс
+    # Сброс
     reset(context.user_data)
 
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    FIX: поддержка deep-link /start site (переход с сайта)
-    Сценарий:
-      - /start site -> сразу переводим в консультацию и просим вставить скопированный текст (ТЗ).
-      - /start без параметров -> показываем меню.
+    Поддержка deep-link /start site (переход с сайта).
     """
     reset(context.user_data)
 
     args = (context.args or [])
     if args and args[0].lower() == "site":
-        # Блокируем повторную запись, если уже была (как и в обычной консультации)
         user = update.effective_user
         allowed, left = await check_lead_allowed(user.id)
         if not allowed:
@@ -137,12 +129,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(".", reply_markup=remove_reply_kb())
 
 
-async def cmd_packages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_packages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Выберите пакет:", reply_markup=packages_kb())
     await update.message.reply_text(".", reply_markup=remove_reply_kb())
 
 
-async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     data = q.data or ""
     user = update.effective_user
@@ -188,7 +180,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ctx.package_name = name
 
         text = render_package_text(name)
-
         await q.message.edit_text(text, parse_mode="HTML", reply_markup=package_details_kb())
         await q.answer()
         return
@@ -223,7 +214,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer("Неизвестное действие")
 
 
-async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     text = (update.message.text or "").strip()
 
@@ -237,7 +228,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "⬅️ Назад" and state == State.LEAD_CONTACT:
         context.user_data["state"] = State.LEAD_TZ.value
-        await update.message.reply_text("Ок. Снова напишите ТЗ одним сообщением.", reply_markup=remove_reply_kb())
+        await update.message.reply_text(
+            "Ок. Снова напишите ТЗ одним сообщением.",
+            reply_markup=remove_reply_kb(),
+        )
         return
 
     if state == State.LEAD_TZ:
@@ -249,8 +243,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• или телефон\n"
             "• или email"
         )
-        await update.message.reply_text(msg, reply_markup=contacts_reply_kb(user.username, user.id))
+        await update.message.reply_text(
+            msg,
+            reply_markup=contacts_reply_kb(user.username, user.id),
+        )
         return
 
     if state == State.LEAD_CONTACT:
-        accept_contact(cont_
+        # КРИТИЧНО: здесь раньше у тебя и был обрыв.
+        accept_contact(context.user_data, text)
+        await _finalize_and_notify(update, context)
+        return
+
+    resp = await ask_openrouter(text)
+    await update.message.reply_text(resp, reply_markup=remove_reply_kb())
