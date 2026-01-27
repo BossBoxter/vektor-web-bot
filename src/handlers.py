@@ -1,5 +1,8 @@
 import logging
+from typing import List, Optional
+
 from telegram import Update
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from .config import config
@@ -32,23 +35,78 @@ from .ratelimit import check_lead_allowed, mark_lead_submitted, human_left
 
 logger = logging.getLogger(__name__)
 
-def _manager_chat_id() -> int | None:
-    try:
-        return int(config.MANAGER_CHAT_ID) if config.MANAGER_CHAT_ID else None
-    except Exception:
-        return None
 
-async def _notify_manager(context: ContextTypes.DEFAULT_TYPE, text: str):
-    chat_id = _manager_chat_id()
-    if not chat_id:
+def _manager_chat_ids() -> List[int]:
+    """
+    MANAGER_CHAT_ID поддерживает:
+    - одно число: "123"
+    - несколько через запятую: "123,456,-100777..."
+    """
+    raw = (config.MANAGER_CHAT_ID or "").strip()
+    if not raw:
+        return []
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    out: List[int] = []
+    for p in parts:
+        try:
+            out.append(int(p))
+        except Exception:
+            logger.error(f"MANAGER_CHAT_ID contains non-numeric value: {p!r}")
+    return out
+
+
+async def _notify_manager_once(context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    ids = _manager_chat_ids()
+    if not ids:
+        logger.error("MANAGER_CHAT_ID is not set. Manager notification skipped.")
+        return False
+
+    ok_any = False
+    for chat_id in ids:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text)
+            ok_any = True
+        except TelegramError:
+            logger.exception(f"Manager notify failed for chat_id={chat_id}")
+        except Exception:
+            logger.exception(f"Unexpected error while notifying manager chat_id={chat_id}")
+
+    return ok_any
+
+
+async def _notify_manager_with_retry(
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    attempt: int = 1,
+    max_attempts: int = 3,
+):
+    ok = await _notify_manager_once(context, text)
+    if ok:
         return
+
+    if attempt >= max_attempts:
+        logger.error("Manager notify окончательно не удалось отправить (max retries reached).")
+        return
+
+    # backoff: 5s, 15s
+    delay = 5 if attempt == 1 else 15
     try:
-        await context.bot.send_message(chat_id=chat_id, text=text)
-    except Exception as e:
-        logger.error(f"Manager notify failed: {e}")
+        context.job_queue.run_once(
+            callback=lambda job_ctx: _notify_manager_with_retry(
+                job_ctx, text, attempt=attempt + 1, max_attempts=max_attempts
+            ),
+            when=delay,
+            data=None,
+            name=f"notify_manager_retry_{attempt}",
+        )
+        logger.error(f"Manager notify scheduled retry attempt={attempt+1} in {delay}s")
+    except Exception:
+        logger.exception("Failed to schedule retry via job_queue")
+
 
 def _user_label(user) -> str:
     return f"@{user.username}" if user.username else f"ID:{user.id}"
+
 
 async def _blocked_lead_reply(message, seconds_left: int):
     t = human_left(seconds_left)
@@ -59,47 +117,49 @@ async def _blocked_lead_reply(message, seconds_left: int):
     await message.reply_text(txt, reply_markup=menu_kb())
     await message.reply_text(" ", reply_markup=remove_reply_kb())
 
+
 async def _finalize_and_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     ЕДИНАЯ точка финала:
     - отправляет FINAL_TEXT клиенту
-    - всегда пытается уведомить менеджера
+    - уведомляет менеджера (с ретраями)
     - ставит блокировку на 24ч
     - сбрасывает состояние
     """
     user = update.effective_user
     ctx = get_ctx(context.user_data)
 
-    # 1) Клиенту (всегда)
+    # 1) Клиенту
     await update.effective_message.reply_text(FINAL_TEXT, reply_markup=menu_kb())
     await update.effective_message.reply_text(" ", reply_markup=remove_reply_kb())
 
-    # 2) Менеджеру (всегда пытаемся)
-    await _notify_manager(
-        context,
-        "\n".join([
-            "🧾 Новая заявка",
-            f"👤 {_user_label(user)}",
-            f"📦 Пакет: {ctx.package_name or 'не выбран (консультация)'}",
-            f"📝 ТЗ: {ctx.tz or ''}",
-            f"📞 Контакт: {ctx.contact or ''}",
-        ])
-    )
+    # 2) Менеджеру (всегда пробуем)
+    manager_text = "\n".join([
+        "🧾 Новая заявка",
+        f"👤 {_user_label(user)}",
+        f"📦 Пакет: {ctx.package_name or 'не выбран (консультация)'}",
+        f"📝 ТЗ: {ctx.tz or ''}",
+        f"📞 Контакт: {ctx.contact or ''}",
+    ])
+    await _notify_manager_with_retry(context, manager_text)
 
-    # 3) Блокировка на 24ч (фиксируем факт записи)
+    # 3) Блокировка на 24ч
     await mark_lead_submitted(user.id)
 
     # 4) Сброс
     reset(context.user_data)
+
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reset(context.user_data)
     await update.message.reply_text(menu_text(), reply_markup=menu_kb())
     await update.message.reply_text(" ", reply_markup=remove_reply_kb())
 
+
 async def cmd_packages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Выберите пакет:", reply_markup=packages_kb())
     await update.message.reply_text(" ", reply_markup=remove_reply_kb())
+
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -147,7 +207,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ctx.package_name = name
 
         text = render_package_text(name)
-
         await q.message.edit_text(text, parse_mode="HTML", reply_markup=package_details_kb())
         await q.answer()
         return
@@ -181,6 +240,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await q.answer("Неизвестное действие")
 
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = (update.message.text or "").strip()
@@ -212,8 +272,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if state == State.LEAD_CONTACT:
         accept_contact(context.user_data, text)
-
-        # ВАЖНО: теперь финал всегда = уведомление менеджеру
         await _finalize_and_notify(update, context)
         return
 
