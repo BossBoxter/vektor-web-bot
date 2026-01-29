@@ -8,7 +8,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict
 
 from telegram import Update
 from telegram.constants import ParseMode
@@ -16,6 +16,7 @@ from telegram.ext import ContextTypes
 
 from .config import config
 from .openrouter import ask_openrouter
+from .spamguard import SpamGuard
 from .text import strings
 from .ui import (
     PACKAGES,
@@ -33,14 +34,14 @@ MAX_AI_REPLY = 3500
 
 MAX_LEADS_PER_USER = 2
 
-# Simple persistent counter (best-effort; survives process lifetime and often survives redeploys if FS persists)
+# Persistent counter for leads
 _DATA_DIR = Path(os.getenv("BOT_DATA_DIR", "data"))
 _LIMITS_FILE = _DATA_DIR / "limits.json"
 
+# Spam guard (persistent bans/cooldowns)
+_GUARD = SpamGuard()
 
-# ---------------------------
-# Persistence (best-effort)
-# ---------------------------
+
 def _load_limits() -> dict:
     try:
         if not _LIMITS_FILE.exists():
@@ -81,19 +82,16 @@ def _inc_user_leads_used(user_id: int) -> int:
     return int(rec["leads_used"])
 
 
-# ---------------------------
-# Target / anti-garbage filters
-# ---------------------------
+# --- garbage filters ---
 _RE_LETTER = re.compile(r"[A-Za-zА-Яа-яЁё]")
-_RE_DIGIT = re.compile(r"\d")
 _RE_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _RE_PHONE = re.compile(r"^\+?\d[\d\-\s\(\)]{6,}$")
 _RE_TG = re.compile(r"^@[\w\d_]{3,}$")
 
 _SPAM_PATTERNS = [
-    re.compile(r"(.)\1{5,}"),            # aaaaaa / !!!!!!!
-    re.compile(r"^[\W_]+$"),             # only symbols
-    re.compile(r"^(?:[A-Za-z]{1,2}|\d{1,2})$"),  # too short noise
+    re.compile(r"(.)\1{5,}"),
+    re.compile(r"^[\W_]+$"),
+    re.compile(r"^(?:[A-Za-z]{1,2}|\d{1,2})$"),
 ]
 
 
@@ -116,21 +114,14 @@ def _is_garbage_text(s: str) -> bool:
     if len(s) < 3:
         return True
     if len(s) > 2500:
-        # too big blobs are treated as non-target for "lead"
         return True
-
     for p in _SPAM_PATTERNS:
         if p.search(s):
             return True
-
-    # if almost no letters and not a valid contact -> garbage
     if _ratio_letters(s) < 0.12 and _ratio_alnum(s) < 0.35:
         return True
-
-    # extremely symbol-heavy
     if _ratio_alnum(s) < 0.20 and len(s) > 12:
         return True
-
     return False
 
 
@@ -140,10 +131,8 @@ def _is_valid_name(name: str) -> bool:
         return False
     if _is_garbage_text(name):
         return False
-    # name should have letters
     if not _RE_LETTER.search(name):
         return False
-    # avoid "12345"
     if _ratio_letters(name) < 0.25:
         return False
     return True
@@ -155,7 +144,6 @@ def _is_valid_contact(contact: str) -> bool:
         return False
     if _is_garbage_text(c):
         return False
-    # accept: telegram @, email, phone-like, or "t.me/..."
     if _RE_TG.match(c):
         return True
     if _RE_EMAIL.match(c):
@@ -164,7 +152,6 @@ def _is_valid_contact(contact: str) -> bool:
         return True
     if "t.me/" in c or "telegram" in c.lower():
         return True
-    # otherwise require decent letters/digits ratio
     return _ratio_alnum(c) >= 0.35
 
 
@@ -174,7 +161,6 @@ def _is_valid_comment(comment: str) -> bool:
         return False
     if _is_garbage_text(c):
         return False
-    # must contain some letters (not only numbers/symbols)
     if len(_RE_LETTER.findall(c)) < 6:
         return False
     return True
@@ -184,9 +170,7 @@ def _esc(s: str) -> str:
     return html.escape(s or "", quote=False)
 
 
-# ---------------------------
-# Lead flow state
-# ---------------------------
+# --- lead flow ---
 @dataclass
 class LeadDraft:
     package_name: str  # key from ui.PACKAGES OR "consult"
@@ -208,16 +192,15 @@ def _leads_remaining(user_id: int) -> int:
     return max(0, MAX_LEADS_PER_USER - used)
 
 
-def _lead_gate_text(user_id: int) -> str:
-    # No questions asked; directive message only
-    return (
-        f"Лимит заявок исчерпан ({MAX_LEADS_PER_USER}/{MAX_LEADS_PER_USER}).\n"
-        f"Доступно: задать один нормальный вопрос сообщением или обратиться в поддержку."
-    )
-
-
 def _lead_allowed(user_id: int) -> bool:
     return _leads_remaining(user_id) > 0
+
+
+def _lead_gate_text() -> str:
+    return (
+        f"Лимит заявок исчерпан ({MAX_LEADS_PER_USER}/{MAX_LEADS_PER_USER}).\n"
+        "Доступно: задать нормальный вопрос сообщением или обратиться в поддержку."
+    )
 
 
 def _format_pkg_line(lead: LeadDraft) -> str:
@@ -229,9 +212,7 @@ def _format_pkg_line(lead: LeadDraft) -> str:
     return f"{lead.package_name} ({price} / {time_})" if (price or time_) else lead.package_name
 
 
-# ---------------------------
-# Handlers
-# ---------------------------
+# --- handlers ---
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = _lang()
     s = strings(lang)
@@ -250,7 +231,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data or ""
     uid = q.from_user.id
 
-    # NAV
     if data == "NAV:MENU":
         await q.message.reply_text("Меню:", reply_markup=menu_kb())
         await q.answer()
@@ -268,7 +248,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "NAV:CONSULT":
         if not _lead_allowed(uid):
-            await q.message.reply_text(_lead_gate_text(uid), reply_markup=menu_kb())
+            await q.message.reply_text(_lead_gate_text(), reply_markup=menu_kb())
             await q.answer()
             return
         _leads[uid] = LeadDraft(package_name="consult", step="name")
@@ -276,7 +256,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         return
 
-    # package details
     if data.startswith("PKG:"):
         name = data.split(":", 1)[1]
         if name not in PACKAGES:
@@ -291,10 +270,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         return
 
-    # lead flow
     if data == "LEAD:ORDER":
         if not _lead_allowed(uid):
-            await q.message.reply_text(_lead_gate_text(uid), reply_markup=menu_kb())
+            await q.message.reply_text(_lead_gate_text(), reply_markup=menu_kb())
             await q.answer()
             return
 
@@ -321,6 +299,24 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg:
         return
 
+    uid = update.effective_user.id
+
+    # ===== SPAM / COOLDOWN / BAN POLICY =====
+    status, left = _GUARD.on_message(uid)
+    if status == "cooldown":
+        if _GUARD.should_notice(uid):
+            _GUARD._set_notice(uid, int(time.time()))
+            await msg.reply_text(f"Слишком часто. Подождите {left} сек.")
+        return
+
+    if status == "ban":
+        if _GUARD.should_notice(uid):
+            _GUARD._set_notice(uid, int(time.time()))
+            # hour/day text is determined by seconds left, without extra branching
+            await msg.reply_text(f"Блокировка за спам. Подождите {left} сек или обратитесь в поддержку.")
+        return
+
+    # ===== normal processing =====
     text = (msg.text or "").strip()
     if not text:
         return
@@ -328,9 +324,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(strings(_lang()).too_long)
         return
 
-    uid = update.effective_user.id
-
-    # If user is filling a lead
+    # lead flow
     if uid in _leads:
         lead = _leads[uid]
 
@@ -359,16 +353,15 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text("Описание выглядит как спам/мусор. Напишите нормальным текстом, что нужно сделать.", reply_markup=lead_cancel_kb())
                 return
 
-            # Final validation + lead limit check (again)
             if not _lead_allowed(uid):
                 _leads.pop(uid, None)
-                await msg.reply_text(_lead_gate_text(uid), reply_markup=menu_kb())
+                await msg.reply_text(_lead_gate_text(), reply_markup=menu_kb())
                 return
 
             lead.comment = text
             _leads.pop(uid, None)
 
-            # Send to manager only if it is "target" (validated)
+            # send "target lead" to manager
             if config.MANAGER_CHAT_ID:
                 try:
                     chat_id = int(config.MANAGER_CHAT_ID)
@@ -399,18 +392,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await msg.reply_text(strings(_lang()).sent_ok, reply_markup=menu_kb())
             else:
                 await msg.reply_text(strings(_lang()).sent_ok, reply_markup=menu_kb())
-
             return
 
-    # Not in lead flow:
-    # - If lead limit reached: allow only "normal question" or support.
-    # - If question is garbage: do not forward to manager.
+    # limit reached: only "target question" allowed
     if not _lead_allowed(uid):
         if _is_garbage_text(text):
-            await msg.reply_text(_lead_gate_text(uid), reply_markup=menu_kb())
+            await msg.reply_text(_lead_gate_text(), reply_markup=menu_kb())
             return
 
-        # target question to manager (not counted as "lead")
         if config.MANAGER_CHAT_ID:
             try:
                 chat_id = int(config.MANAGER_CHAT_ID)
@@ -425,7 +414,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("Вопрос принят. Поддержка/менеджер ответит.", reply_markup=menu_kb())
         return
 
-    # Lead still allowed: normal question path (AI if enabled, otherwise manager), but filter garbage
+    # lead still allowed: normal question path, but reject garbage
     if _is_garbage_text(text):
         await msg.reply_text("Сообщение похоже на спам/мусор. Отправьте нормальный вопрос одним сообщением.", reply_markup=menu_kb())
         return
