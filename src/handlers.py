@@ -79,16 +79,18 @@ def _inc_user_leads_used(user_id: int) -> int:
     return int(rec["leads_used"])
 
 
-# --- garbage filters ---
+# =========================
+# ANTI-GARBAGE / GIBBERISH
+# =========================
 _RE_LETTER = re.compile(r"[A-Za-zА-Яа-яЁё]")
 _RE_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _RE_PHONE = re.compile(r"^\+?\d[\d\-\s\(\)]{6,}$")
 _RE_TG = re.compile(r"^@[\w\d_]{3,}$")
 
 _SPAM_PATTERNS = [
-    re.compile(r"(.)\1{5,}"),
-    re.compile(r"^[\W_]+$"),
-    re.compile(r"^(?:[A-Za-z]{1,2}|\d{1,2})$"),
+    re.compile(r"(.)\1{5,}"),              # aaaaaa / !!!!!!!
+    re.compile(r"^[\W_]+$"),               # only symbols/underscores
+    re.compile(r"^(?:[A-Za-z]{1,2}|\d{1,2})$"),  # too short noise
 ]
 
 
@@ -106,19 +108,69 @@ def _ratio_alnum(s: str) -> float:
     return alnum / max(1, len(s))
 
 
+def _tokens(s: str) -> list[str]:
+    return re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", (s or "").strip())
+
+
+def _unique_bigram_ratio(s: str) -> float:
+    s = re.sub(r"\s+", "", (s or "").lower())
+    if len(s) < 8:
+        return 1.0
+    bigrams = [s[i : i + 2] for i in range(len(s) - 1)]
+    if not bigrams:
+        return 1.0
+    return len(set(bigrams)) / len(bigrams)
+
+
+def _looks_like_gibberish(s: str) -> bool:
+    s = (s or "").strip()
+    if len(s) < 8:
+        return False
+
+    compact = re.sub(r"\s+", "", s)
+
+    # 1) repeated short chunk: "фыв" * N, "abc" * N
+    m = re.match(r"^(.{2,5})\1{3,}$", compact, flags=re.IGNORECASE)
+    if m:
+        return True
+
+    toks = _tokens(s)
+
+    # 2) one long token without spaces: "фывывфывфывывы..."
+    if len(toks) == 1 and len(toks[0]) >= 10:
+        tok = toks[0]
+        # if no digits and low bigram diversity => syllable spam
+        if not any(ch.isdigit() for ch in tok):
+            if _unique_bigram_ratio(tok) < 0.35:
+                return True
+
+    # 3) one "word" message but long enough: likely random letters
+    if len(toks) == 1 and len(compact) >= 18:
+        return True
+
+    return False
+
+
 def _is_garbage_text(s: str) -> bool:
     s = (s or "").strip()
     if len(s) < 3:
         return True
     if len(s) > 2500:
         return True
+
     for p in _SPAM_PATTERNS:
         if p.search(s):
             return True
+
     if _ratio_letters(s) < 0.12 and _ratio_alnum(s) < 0.35:
         return True
+
     if _ratio_alnum(s) < 0.20 and len(s) > 12:
         return True
+
+    if _looks_like_gibberish(s):
+        return True
+
     return False
 
 
@@ -160,6 +212,9 @@ def _is_valid_comment(comment: str) -> bool:
         return False
     if len(_RE_LETTER.findall(c)) < 6:
         return False
+    # require at least 2 tokens (blocks "фывывфывфывы..." and single-word garbage)
+    if len(_tokens(c)) < 2:
+        return False
     return True
 
 
@@ -167,6 +222,9 @@ def _esc_html(s: str) -> str:
     return html.escape(s or "", quote=False)
 
 
+# =========================
+# STATE
+# =========================
 @dataclass
 class LeadDraft:
     package_name: str  # key from ui.PACKAGES OR "consult"
@@ -209,22 +267,33 @@ def _format_pkg_line(lead: LeadDraft) -> str:
     return f"{lead.package_name} ({price} / {time_})" if (price or time_) else lead.package_name
 
 
+# =========================
+# HANDLERS
+# =========================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t = _t()
     title = t["start_title"]
     body = t["start_body"]
-    # В text.py жирный в Markdown (**) -> используем Markdown
-    await update.effective_message.reply_text(f"{title}\n\n{body}", reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text(
+        f"{title}\n\n{body}",
+        reply_markup=menu_kb(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
 
 async def cmd_packages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(_t()["choose_package"], reply_markup=packages_kb(), parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text(
+        _t()["choose_package"],
+        reply_markup=packages_kb(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not q:
         return
+
     data = q.data or ""
     uid = q.from_user.id
     t = _t()
@@ -240,7 +309,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "NAV:HOW":
-        # how_text() у тебя без Markdown, оставляем plain
         await q.message.reply_text(how_text(), reply_markup=how_kb())
         await q.answer()
         return
@@ -251,7 +319,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer()
             return
         _leads[uid] = LeadDraft(package_name="consult", step="name")
-        await q.message.reply_text(t["consult_start"] + "\n\n" + t["ask_name"], reply_markup=lead_cancel_kb(), parse_mode=ParseMode.MARKDOWN)
+        await q.message.reply_text(
+            t["consult_start"] + "\n\n" + t["ask_name"],
+            reply_markup=lead_cancel_kb(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
         await q.answer()
         return
 
@@ -262,7 +334,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await q.message.reply_text(
             render_package_text(name),
-            parse_mode=ParseMode.HTML,  # ui.render_package_text uses <b>
+            parse_mode=ParseMode.HTML,
             reply_markup=package_details_kb(),
         )
         context.user_data["selected_package"] = name
@@ -274,10 +346,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text(_lead_gate_text(), reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
             await q.answer()
             return
+
         name = context.user_data.get("selected_package")
         if not name or name not in PACKAGES:
             await q.answer("Сначала выберите вариант", show_alert=True)
             return
+
         _leads[uid] = LeadDraft(package_name=name, step="name")
         await q.message.reply_text(t["ask_name"], reply_markup=lead_cancel_kb(), parse_mode=ParseMode.MARKDOWN)
         await q.answer()
@@ -296,16 +370,18 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg:
         return
+
     uid = update.effective_user.id
     t = _t()
 
-    # spam / cooldown / ban
+    # SpamGuard: cooldown/ban
     status, left = _GUARD.on_message(uid)
     if status == "cooldown":
         if _GUARD.should_notice(uid):
             _GUARD._set_notice(uid, int(time.time()))
             await msg.reply_text(t["cooldown_seconds"].format(seconds=left), parse_mode=ParseMode.MARKDOWN)
         return
+
     if status == "ban":
         if _GUARD.should_notice(uid):
             _GUARD._set_notice(uid, int(time.time()))
@@ -315,11 +391,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (msg.text or "").strip()
     if not text:
         return
+
     if len(text) > MAX_USER_TEXT:
         await msg.reply_text(t["too_long"], parse_mode=ParseMode.MARKDOWN)
         return
 
-    # lead flow
+    # Lead flow
     if uid in _leads:
         lead = _leads[uid]
 
@@ -356,6 +433,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lead.comment = text
             _leads.pop(uid, None)
 
+            # Send target lead to manager
             if config.MANAGER_CHAT_ID:
                 try:
                     chat_id = int(config.MANAGER_CHAT_ID)
@@ -389,12 +467,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text(t["sent_ok"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
             return
 
-    # limit reached: only target question
-    if not _lead_allowed(uid):
-        if _is_garbage_text(text):
-            await msg.reply_text(_lead_gate_text(), reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
-            return
+    # Not in lead flow: block garbage before manager/AI
+    if _is_garbage_text(text):
+        await msg.reply_text(t["garbage_text"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
+        return
 
+    # Lead limit reached: allow only target question (already validated above)
+    if not _lead_allowed(uid):
         if config.MANAGER_CHAT_ID:
             try:
                 chat_id = int(config.MANAGER_CHAT_ID)
@@ -407,11 +486,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
         await msg.reply_text(t["sent_ok_alt"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
-        return
-
-    # reject garbage
-    if _is_garbage_text(text):
-        await msg.reply_text(t["garbage_text"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
         return
 
     # AI
@@ -427,7 +501,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    # fallback: forward question to manager
+    # Fallback: forward as target question (already validated above)
     if config.MANAGER_CHAT_ID:
         try:
             chat_id = int(config.MANAGER_CHAT_ID)
