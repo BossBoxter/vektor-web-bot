@@ -9,6 +9,7 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
+from .antispam import AntiSpam
 from .config import config
 from .openrouter import ask_openrouter
 from .text import strings
@@ -26,10 +27,16 @@ from .ui import (
 MAX_USER_TEXT = 4000
 MAX_AI_REPLY = 3500
 
+# Anti-spam instance (per process)
+_SPAM = AntiSpam(
+    user_capacity=10.0,         # burst
+    user_refill_per_sec=0.6,    # ~1 msg / 1.6 sec
+)
+
 
 @dataclass
 class LeadDraft:
-    package_name: str  # package key from ui.PACKAGES OR "consult"
+    package_name: str  # key from ui.PACKAGES OR "consult"
     name: str = ""
     contact: str = ""
     comment: str = ""
@@ -47,7 +54,21 @@ def _esc(s: str) -> str:
     return html.escape(s or "", quote=False)
 
 
+async def _rate_limit_user(update: Update, context: ContextTypes.DEFAULT_TYPE, cost: float = 1.0) -> bool:
+    uid = update.effective_user.id if update.effective_user else 0
+    ok, retry = _SPAM.allow_user(uid, cost=cost)
+    if ok:
+        return True
+
+    msg = update.effective_message
+    if msg:
+        await msg.reply_text(f"Слишком часто. Повторите через {retry} сек.")
+    return False
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _rate_limit_user(update, context, cost=1.0):
+        return
     lang = _lang()
     s = strings(lang)
     title = f"{s.start_title} {config.BRAND_NAME}"
@@ -55,10 +76,22 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_packages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _rate_limit_user(update, context, cost=1.0):
+        return
     await update.effective_message.reply_text(strings(_lang()).choose_package, reply_markup=packages_kb())
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # callbacks often spam-clicked -> higher cost
+    if not await _rate_limit_user(update, context, cost=1.5):
+        # answer callback to stop spinner if possible
+        if update.callback_query:
+            try:
+                await update.callback_query.answer()
+            except Exception:
+                pass
+        return
+
     q = update.callback_query
     if not q:
         return
@@ -81,7 +114,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "NAV:CONSULT":
-        # Консультация: лид без привязки к пакету
         _leads[q.from_user.id] = LeadDraft(package_name="consult", step="name")
         await q.message.reply_text("Консультация.\n\n" + strings(_lang()).ask_name, reply_markup=lead_cancel_kb())
         await q.answer()
@@ -123,6 +155,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # messages are primary spam vector
+    if not await _rate_limit_user(update, context, cost=1.0):
+        return
+
     msg = update.effective_message
     if not msg:
         return
@@ -193,7 +229,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     # ===== AI OR FALLBACK QUESTION =====
+    # AI is expensive -> add extra cost if enabled
     if config.OPENROUTER_API_KEY:
+        ok, retry = _SPAM.allow_user(uid, cost=2.5)  # tighter for AI requests
+        if not ok:
+            await msg.reply_text(f"Слишком часто. Повторите через {retry} сек.")
+            return
         try:
             reply = await ask_openrouter(text)
             reply = (reply or "").strip()
