@@ -1,9 +1,10 @@
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+SUPPORT_URL = "https://t.me/bloknotpr"
 
 # =========================
-# ПАКЕТЫ (единый источник)
+# ПАКЕТЫ
 # =========================
-
 PACKAGES = {
     "Быстрый запуск": {
         "button": "🚀 Быстрый запуск — заявки",
@@ -121,125 +122,96 @@ PACKAGES = {
     },
 }
 
-SUPPORT_URL = "https://t.me/bloknotpr"
-
-
 # =========================
-# КЛАВИАТУРЫ
+# ГЛАВНОЕ МЕНЮ: 4 КНОПКИ
 # =========================
-
-def menu_kb() -> InlineKeyboardMarkup:
-    # Уровень 1: только цели + “помочь определиться” + поддержка
+def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚀 Запустить сайт", callback_data="GOAL:FAST")],
-        [InlineKeyboardButton("💰 Получать заявки", callback_data="GOAL:LEADS")],
-        [InlineKeyboardButton("👤 Упаковать личный бренд", callback_data="GOAL:BRAND")],
-        [InlineKeyboardButton("🤖 Автоматизировать", callback_data="GOAL:AUTO")],
-        [InlineKeyboardButton("📝 Помочь определиться", callback_data="NAV:CONSULT")],
-        [InlineKeyboardButton("🆘 Поддержка", url=SUPPORT_URL)],
+        [InlineKeyboardButton("✅ Подобрать решение", callback_data="NAV:PICK")],
+        [InlineKeyboardButton("📦 Пакеты и цены", callback_data="NAV:PACKAGES")],
+        [InlineKeyboardButton("📝 Оставить заявку", callback_data="NAV:LEAD")],
+        [InlineKeyboardButton("🆘 Вопрос / Поддержка", callback_data="NAV:SUPPORT")],
     ])
 
+def back_to_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏠 В меню", callback_data="NAV:MENU")],
+    ])
 
+def support_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🆘 Открыть поддержку", url=SUPPORT_URL)],
+        [InlineKeyboardButton("🏠 В меню", callback_data="NAV:MENU")],
+    ])
+
+# =========================
+# ПАКЕТЫ
+# =========================
 def packages_kb() -> InlineKeyboardMarkup:
-    # Служебное меню (для /packages). Основная навигация его не использует.
     rows = []
     for name, p in PACKAGES.items():
         rows.append([InlineKeyboardButton(p["button"], callback_data=f"PKG:{name}")])
     rows.append([InlineKeyboardButton("🏠 В меню", callback_data="NAV:MENU")])
-    rows.append([InlineKeyboardButton("🆘 Поддержка", url=SUPPORT_URL)])
     return InlineKeyboardMarkup(rows)
 
-
-def goal_choice_kb(goal: str) -> InlineKeyboardMarkup:
-    # Уровень 2: 1 действие “показать решение” + индивидуально + якоря
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Показать решение", callback_data=f"GOALSHOW:{goal}")],
-        [InlineKeyboardButton("🧩 Индивидуально", callback_data="PKG:Индивидуальный проект")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="NAV:BACK")],
-        [InlineKeyboardButton("🏠 В меню", callback_data="NAV:MENU")],
-        [InlineKeyboardButton("🆘 Поддержка", url=SUPPORT_URL)],
-    ])
-
-
 def package_details_kb() -> InlineKeyboardMarkup:
-    # Уровень 3: действие + якоря
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Хочу такой результат", callback_data="LEAD:ORDER")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="NAV:BACK")],
+        [InlineKeyboardButton("✅ Оформить", callback_data="LEAD:ORDER")],
+        [InlineKeyboardButton("📦 Все пакеты", callback_data="NAV:PACKAGES")],
         [InlineKeyboardButton("🏠 В меню", callback_data="NAV:MENU")],
-        [InlineKeyboardButton("🆘 Поддержка", url=SUPPORT_URL)],
     ])
-
 
 def lead_cancel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("❌ Отмена", callback_data="LEAD:CANCEL")],
         [InlineKeyboardButton("🏠 В меню", callback_data="NAV:MENU")],
-        [InlineKeyboardButton("🆘 Поддержка", url=SUPPORT_URL)],
     ])
 
-
-def how_kb() -> InlineKeyboardMarkup:
+# =========================
+# ПОДБОР РЕШЕНИЯ: 3 ВОПРОСА
+# =========================
+def pick_goal_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬅️ Назад", callback_data="NAV:BACK")],
+        [InlineKeyboardButton("🚀 Запуск быстро", callback_data="PICK:GOAL:FAST")],
+        [InlineKeyboardButton("💰 Нужны заявки", callback_data="PICK:GOAL:LEADS")],
+        [InlineKeyboardButton("👤 Личный бренд", callback_data="PICK:GOAL:BRAND")],
+        [InlineKeyboardButton("🛒 Каталог/магазин", callback_data="PICK:GOAL:SHOP")],
+        [InlineKeyboardButton("🤖 Автоматизация", callback_data="PICK:GOAL:AUTO")],
         [InlineKeyboardButton("🏠 В меню", callback_data="NAV:MENU")],
-        [InlineKeyboardButton("🆘 Поддержка", url=SUPPORT_URL)],
     ])
 
+def pick_deadline_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔥 Срочно (1–3 дня)", callback_data="PICK:DEADLINE:URGENT")],
+        [InlineKeyboardButton("⏳ Нормально (до 2 недель)", callback_data="PICK:DEADLINE:NORMAL")],
+        [InlineKeyboardButton("🗓 Не важно", callback_data="PICK:DEADLINE:ANY")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="PICK:BACK")],
+        [InlineKeyboardButton("🏠 В меню", callback_data="NAV:MENU")],
+    ])
 
-def contacts_reply_kb(username: str | None, user_id: int) -> ReplyKeyboardMarkup:
-    tag = f"@{username}" if username else f"ID:{user_id}"
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton(tag)], [KeyboardButton("❌ Отмена")]],
-        resize_keyboard=True,
-        one_time_keyboard=False,
-        input_field_placeholder="Выберите контакт или напишите его",
-    )
-
-
-def remove_reply_kb() -> ReplyKeyboardRemove:
-    return ReplyKeyboardRemove()
-
-
-# =========================
-# ТЕКСТЫ ЭКРАНОВ
-# =========================
-
-def menu_text() -> str:
-    return (
-        "VEKTOR Web — сайты и Telegram-боты,\n"
-        "которые приводят заявки.\n\n"
-        "Выберите, что вам нужно."
-    )
-
-
-def how_text() -> str:
-    return (
-        "Как мы работаем 👇\n\n"
-        "1️⃣ Вы выбираете цель\n"
-        "2️⃣ Мы показываем подходящее решение\n"
-        "3️⃣ Вы оставляете контакт и задачу\n"
-        "4️⃣ Менеджер уточняет детали\n"
-        "5️⃣ Фиксируем сроки и стоимость\n\n"
-        "Сроки и стоимость подтверждаются после уточнения задачи."
-    )
-
+def pick_budget_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("до 25k", callback_data="PICK:BUDGET:25")],
+        [InlineKeyboardButton("до 50k", callback_data="PICK:BUDGET:50")],
+        [InlineKeyboardButton("100k+", callback_data="PICK:BUDGET:100")],
+        [InlineKeyboardButton("не знаю", callback_data="PICK:BUDGET:UNK")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="PICK:BACK")],
+        [InlineKeyboardButton("🏠 В меню", callback_data="NAV:MENU")],
+    ])
 
 # =========================
-# РЕНДЕР ПАКЕТА (HTML)
+# РЕНДЕР КАРТОЧКИ ПАКЕТА (HTML)
 # =========================
-
 def render_package_text(name: str) -> str:
     p = PACKAGES[name]
     fits = "\n".join(f"• {x}" for x in p.get("fits", []))
     features = "\n".join(f"• {f}" for f in p["features"])
-
     return (
         f"<b>{p['button']}</b>\n\n"
-        f"<b>Подойдёт, если вы:</b>\n{fits}\n\n"
-        f"<b>Что вы получите:</b>\n<b>{p['result']}</b>\n\n"
-        f"<b>Срок:</b>\n<b>{p['time']}</b>\n\n"
-        f"<b>Стоимость:</b>\n<b>{p['price']}</b>\n\n"
+        f"<b>Подойдёт, если:</b>\n{fits}\n\n"
+        f"<b>Результат:</b>\n<b>{p['result']}</b>\n\n"
+        f"<b>Срок:</b> <b>{p['time']}</b>\n"
+        f"<b>Стоимость:</b> <b>{p['price']}</b>\n\n"
         f"<b>Что входит:</b>\n{features}\n\n"
         f"{p['desc']}"
     )
