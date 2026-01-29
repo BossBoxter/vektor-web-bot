@@ -12,20 +12,20 @@ class Config:
     WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://vektor-web-bot.fly.dev
     MANAGER_CHAT_ID = os.getenv("MANAGER_CHAT_ID", "").strip()  # numeric string
 
+    # Locale
+    DEFAULT_LANG = os.getenv("DEFAULT_LANG", "ru").strip().lower()  # ru|en
+
     # Branding / links
     BRAND_NAME = os.getenv("BRAND_NAME", "VEKTOR Web")
     BOT_TG_URL = os.getenv("BOT_TG_URL", "https://t.me/vektorwebbot")
 
     # Leads API (site -> fly)
-    # Comma-separated list of allowed origins for CORS.
-    # Example: "https://username.github.io,https://vektor-web.ru"
     ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "").strip()
-    # Optional shared secret: client sends header X-Lead-Secret
     LEAD_SECRET = os.getenv("LEAD_SECRET", "").strip()
 
     # AI (optional)
-    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-    OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+    OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini").strip()
     OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
     @classmethod
