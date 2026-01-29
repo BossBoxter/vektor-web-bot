@@ -32,13 +32,20 @@ from .ui import (
 MAX_USER_TEXT = 4000
 MAX_AI_REPLY = 3500
 MAX_LEADS_PER_USER = 2
-MIN_USER_TEXT = 15
-
+MIN_USER_TEXT = 15  # новые входящие сообщения короче этого не обрабатываются
 
 _DATA_DIR = Path(os.getenv("BOT_DATA_DIR", "data"))
 _LIMITS_FILE = _DATA_DIR / "limits.json"
 
 _GUARD = SpamGuard()
+
+_GOALS = {
+    "FAST": "Быстрый запуск",
+    "LEADS": "Продающий лендинг",
+    "BRAND": "Личный бренд",
+    "SHOP": "Магазин / каталог",
+    "AUTO": "Автоматизация + бот",
+}
 
 
 def _load_limits() -> dict:
@@ -90,9 +97,9 @@ _RE_PHONE = re.compile(r"^\+?\d[\d\-\s\(\)]{6,}$")
 _RE_TG = re.compile(r"^@[\w\d_]{3,}$")
 
 _SPAM_PATTERNS = [
-    re.compile(r"(.)\1{5,}"),              # aaaaaa / !!!!!!!
-    re.compile(r"^[\W_]+$"),               # only symbols/underscores
-    re.compile(r"^(?:[A-Za-z]{1,2}|\d{1,2})$"),  # too short noise
+    re.compile(r"(.)\1{5,}"),
+    re.compile(r"^[\W_]+$"),
+    re.compile(r"^(?:[A-Za-z]{1,2}|\d{1,2})$"),
 ]
 
 
@@ -131,22 +138,19 @@ def _looks_like_gibberish(s: str) -> bool:
 
     compact = re.sub(r"\s+", "", s)
 
-    # 1) repeated short chunk: "фыв" * N, "abc" * N
-    m = re.match(r"^(.{2,5})\1{3,}$", compact, flags=re.IGNORECASE)
-    if m:
+    # repeated short chunk
+    if re.match(r"^(.{2,5})\1{3,}$", compact, flags=re.IGNORECASE):
         return True
 
     toks = _tokens(s)
 
-    # 2) one long token without spaces: "фывывфывфывывы..."
+    # one long token
     if len(toks) == 1 and len(toks[0]) >= 10:
         tok = toks[0]
-        # if no digits and low bigram diversity => syllable spam
-        if not any(ch.isdigit() for ch in tok):
-            if _unique_bigram_ratio(tok) < 0.35:
-                return True
+        if not any(ch.isdigit() for ch in tok) and _unique_bigram_ratio(tok) < 0.35:
+            return True
 
-    # 3) one "word" message but long enough: likely random letters
+    # one "word" but long
     if len(toks) == 1 and len(compact) >= 18:
         return True
 
@@ -214,7 +218,6 @@ def _is_valid_comment(comment: str) -> bool:
         return False
     if len(_RE_LETTER.findall(c)) < 6:
         return False
-    # require at least 2 tokens (blocks "фывывфывфывы..." and single-word garbage)
     if len(_tokens(c)) < 2:
         return False
     return True
@@ -274,10 +277,8 @@ def _format_pkg_line(lead: LeadDraft) -> str:
 # =========================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t = _t()
-    title = t["start_title"]
-    body = t["start_body"]
     await update.effective_message.reply_text(
-        f"{title}\n\n{body}",
+        f"{t['start_title']}\n\n{t['start_body']}",
         reply_markup=menu_kb(),
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -301,7 +302,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t = _t()
 
     if data == "NAV:MENU":
-        await q.message.reply_text("**Меню 🏠**", reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
+        await q.message.reply_text(
+            f"{t['start_title']}\n\n{t['start_body']}",
+            reply_markup=menu_kb(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
         await q.answer()
         return
 
@@ -326,6 +331,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=lead_cancel_kb(),
             parse_mode=ParseMode.MARKDOWN,
         )
+        await q.answer()
+        return
+
+    if data.startswith("GOAL:"):
+        goal = data.split(":", 1)[1].strip()
+        pkg_name = _GOALS.get(goal)
+        if not pkg_name or pkg_name not in PACKAGES:
+            await q.answer("Не найдено", show_alert=True)
+            return
+        await q.message.reply_text(
+            render_package_text(pkg_name),
+            parse_mode=ParseMode.HTML,
+            reply_markup=package_details_kb(),
+        )
+        context.user_data["selected_package"] = pkg_name
         await q.answer()
         return
 
@@ -376,7 +396,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     t = _t()
 
-    # SpamGuard: cooldown/ban
+    # SpamGuard
     status, left = _GUARD.on_message(uid)
     if status == "cooldown":
         if _GUARD.should_notice(uid):
@@ -390,17 +410,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(t["hard_block"], parse_mode=ParseMode.MARKDOWN)
         return
 
-text = (msg.text or "").strip()
-if not text:
-    return
+    text = (msg.text or "").strip()
+    if not text:
+        return
 
-if len(text) < MIN_USER_TEXT:
-    await msg.reply_text(
-        t["too_short"],
-        reply_markup=menu_kb(),
-        parse_mode=ParseMode.MARKDOWN,
-    )
-    return
+    if len(text) < MIN_USER_TEXT:
+        await msg.reply_text(t["too_short"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
+        return
 
     if len(text) > MAX_USER_TEXT:
         await msg.reply_text(t["too_long"], parse_mode=ParseMode.MARKDOWN)
@@ -443,19 +459,17 @@ if len(text) < MIN_USER_TEXT:
             lead.comment = text
             _leads.pop(uid, None)
 
-            # Send target lead to manager
             if config.MANAGER_CHAT_ID:
                 try:
                     chat_id = int(config.MANAGER_CHAT_ID)
                     pkg_line = _format_pkg_line(lead)
-
                     notify = (
                         "<b>🆕 Целевая заявка</b>\n"
                         f"<b>Бренд:</b> {_esc_html(config.BRAND_NAME)}\n"
                         f"<b>Пакет:</b> {_esc_html(pkg_line)}\n"
                         f"<b>Имя:</b> {_esc_html(lead.name)}\n"
                         f"<b>Контакт:</b> {_esc_html(lead.contact)}\n"
-                        f"<b>Комментарий:</b>\n{_esc_html(lead.comment)}\n\n"
+                        f"<b>Задача:</b>\n{_esc_html(lead.comment)}\n\n"
                         f"<b>От:</b> @{_esc_html(update.effective_user.username or '—')} / id={update.effective_user.id}"
                     )
                     await context.bot.send_message(
@@ -477,12 +491,12 @@ if len(text) < MIN_USER_TEXT:
                 await msg.reply_text(t["sent_ok"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
             return
 
-    # Not in lead flow: block garbage before manager/AI
+    # Block garbage before manager/AI
     if _is_garbage_text(text):
         await msg.reply_text(t["garbage_text"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
         return
 
-    # Lead limit reached: allow only target question (already validated above)
+    # Lead limit reached: allow only target question (already validated)
     if not _lead_allowed(uid):
         if config.MANAGER_CHAT_ID:
             try:
@@ -511,7 +525,7 @@ if len(text) < MIN_USER_TEXT:
         except Exception:
             pass
 
-    # Fallback: forward as target question (already validated above)
+    # Fallback: forward as target question
     if config.MANAGER_CHAT_ID:
         try:
             chat_id = int(config.MANAGER_CHAT_ID)
