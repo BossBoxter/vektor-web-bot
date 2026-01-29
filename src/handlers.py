@@ -32,6 +32,8 @@ from .ui import (
 MAX_USER_TEXT = 4000
 MAX_AI_REPLY = 3500
 MAX_LEADS_PER_USER = 2
+MIN_USER_TEXT = 15
+
 
 _DATA_DIR = Path(os.getenv("BOT_DATA_DIR", "data"))
 _LIMITS_FILE = _DATA_DIR / "limits.json"
@@ -388,9 +390,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(t["hard_block"], parse_mode=ParseMode.MARKDOWN)
         return
 
-    text = (msg.text or "").strip()
-    if not text:
-        return
+text = (msg.text or "").strip()
+if not text:
+    return
+
+if len(text) < MIN_USER_TEXT:
+    await msg.reply_text(
+        t["too_short"],
+        reply_markup=menu_kb(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return
 
     if len(text) > MAX_USER_TEXT:
         await msg.reply_text(t["too_long"], parse_mode=ParseMode.MARKDOWN)
