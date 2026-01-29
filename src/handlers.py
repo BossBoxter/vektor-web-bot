@@ -32,7 +32,12 @@ from .ui import (
 MAX_USER_TEXT = 4000
 MAX_AI_REPLY = 3500
 MAX_LEADS_PER_USER = 2
-MIN_USER_TEXT = 15  # новые входящие сообщения короче этого не обрабатываются
+
+# context-aware minimums
+MIN_GENERAL_TEXT = 15
+MIN_NAME_TEXT = 2
+MIN_CONTACT_TEXT = 3
+MIN_TASK_TEXT = 30
 
 _DATA_DIR = Path(os.getenv("BOT_DATA_DIR", "data"))
 _LIMITS_FILE = _DATA_DIR / "limits.json"
@@ -414,10 +419,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    if len(text) < MIN_USER_TEXT:
-        await msg.reply_text(t["too_short"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
-        return
-
     if len(text) > MAX_USER_TEXT:
         await msg.reply_text(t["too_long"], parse_mode=ParseMode.MARKDOWN)
         return
@@ -427,6 +428,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lead = _leads[uid]
 
         if lead.step == "name":
+            if len(text) < MIN_NAME_TEXT:
+                await msg.reply_text(t["too_short_name"], reply_markup=lead_cancel_kb(), parse_mode=ParseMode.MARKDOWN)
+                return
             if not _is_valid_name(text):
                 await msg.reply_text(t["bad_name"], reply_markup=lead_cancel_kb(), parse_mode=ParseMode.MARKDOWN)
                 return
@@ -437,6 +441,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if lead.step == "contact":
+            if len(text) < MIN_CONTACT_TEXT:
+                await msg.reply_text(t["too_short_contact"], reply_markup=lead_cancel_kb(), parse_mode=ParseMode.MARKDOWN)
+                return
             if not _is_valid_contact(text):
                 await msg.reply_text(t["bad_contact"], reply_markup=lead_cancel_kb(), parse_mode=ParseMode.MARKDOWN)
                 return
@@ -447,6 +454,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if lead.step == "comment":
+            if len(text) < MIN_TASK_TEXT:
+                await msg.reply_text(t["too_short_task"], reply_markup=lead_cancel_kb(), parse_mode=ParseMode.MARKDOWN)
+                return
             if not _is_valid_comment(text):
                 await msg.reply_text(t["bad_comment"], reply_markup=lead_cancel_kb(), parse_mode=ParseMode.MARKDOWN)
                 return
@@ -490,6 +500,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await msg.reply_text(t["sent_ok"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
             return
+
+    # Outside lead flow: require minimal length for questions/messages
+    if len(text) < MIN_GENERAL_TEXT:
+        await msg.reply_text(t["too_short_general"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
+        return
 
     # Block garbage before manager/AI
     if _is_garbage_text(text):
