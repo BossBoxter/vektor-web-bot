@@ -1,19 +1,19 @@
 # src/bot.py
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import time
 import uuid
+import html
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from aiohttp import web
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 
+from .antispam import AntiSpam
 from .config import config
 from .handlers import cmd_start, cmd_packages, on_callback, on_text
 
@@ -60,6 +60,15 @@ def _with_cors(request: web.Request, resp: web.StreamResponse) -> web.StreamResp
     return resp
 
 
+# Anti-spam for /lead (per IP)
+_LEAD_GUARD = AntiSpam(
+    ip_capacity=20.0,        # burst
+    ip_refill_per_sec=0.7,   # ~1 req / 1.4 sec per IP
+    user_capacity=1.0,       # unused here
+    user_refill_per_sec=0.1,
+)
+
+
 def build_telegram_app() -> Application:
     config.validate()
 
@@ -96,13 +105,29 @@ def _sanitize(s: str, limit: int = 2000) -> str:
     return s
 
 
+def _esc(s: str) -> str:
+    return html.escape(s or "", quote=False)
+
+
+def _client_ip(request: web.Request) -> str:
+    # Fly header (most common)
+    ip = (request.headers.get("Fly-Client-IP") or "").strip()
+    if ip:
+        return ip
+    # fallback
+    xff = (request.headers.get("X-Forwarded-For") or "").strip()
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote or "unknown"
+
+
 async def lead_options(request: web.Request) -> web.Response:
     resp = web.Response(status=204)
     return _with_cors(request, resp)
 
 
 async def lead_post(request: web.Request) -> web.Response:
-    # CORS: only allow known origins
+    # CORS: only allow known origins if configured
     if ALLOWED_ORIGINS:
         if not _cors_origin(request):
             return web.json_response({"ok": False, "code": "cors_blocked"}, status=403)
@@ -112,6 +137,13 @@ async def lead_post(request: web.Request) -> web.Response:
         got = (request.headers.get("X-Lead-Secret") or "").strip()
         if got != config.LEAD_SECRET:
             return web.json_response({"ok": False, "code": "bad_secret"}, status=403)
+
+    # IP rate limit (anti-ddos)
+    ip = _client_ip(request)
+    ok, retry = _LEAD_GUARD.allow_ip(ip, cost=1.0)
+    if not ok:
+        resp = web.json_response({"ok": False, "code": "rate_limited", "retry_after": retry}, status=429)
+        return _with_cors(request, resp)
 
     try:
         payload = await request.json()
@@ -137,32 +169,31 @@ async def lead_post(request: web.Request) -> web.Response:
         return _with_cors(request, resp)
 
     request_id = uuid.uuid4().hex[:12]
-    ip = request.headers.get("CF-Connecting-IP") or request.remote or ""
     ua = _sanitize(request.headers.get("User-Agent", ""), 200)
 
-    # Build manager message
+    # Build manager message (HTML-safe)
     lines = [
-        "<b>Новая заявка с сайта</b> 🧾",
-        f"<b>request_id:</b> <code>{request_id}</code>",
-        f"<b>ts:</b> <code>{_now_iso()}</code>",
-        f"<b>source:</b> {source}",
+        "<b>Новая заявка с сайта</b>",
+        f"<b>request_id:</b> <code>{_esc(request_id)}</code>",
+        f"<b>ts:</b> <code>{_esc(_now_iso())}</code>",
+        f"<b>source:</b> {_esc(source)}",
     ]
     if name:
-        lines.append(f"<b>Имя:</b> {name}")
+        lines.append(f"<b>Имя:</b> {_esc(name)}")
     if contact:
-        lines.append(f"<b>Контакт:</b> {contact}")
+        lines.append(f"<b>Контакт:</b> {_esc(contact)}")
     if package:
-        lines.append(f"<b>Пакет:</b> {package}")
+        lines.append(f"<b>Пакет:</b> {_esc(package)}")
     if page:
-        lines.append(f"<b>Страница:</b> {page}")
+        lines.append(f"<b>Страница:</b> {_esc(page)}")
     if ip:
-        lines.append(f"<b>IP:</b> <code>{ip}</code>")
+        lines.append(f"<b>IP:</b> <code>{_esc(ip)}</code>")
     if ua:
-        lines.append(f"<b>UA:</b> <code>{ua}</code>")
+        lines.append(f"<b>UA:</b> <code>{_esc(ua)}</code>")
     if utm_str:
-        lines.append(f"<b>UTM:</b> <code>{_sanitize(utm_str, 1200)}</code>")
+        lines.append(f"<b>UTM:</b> <code>{_esc(_sanitize(utm_str, 1200))}</code>")
     if message:
-        lines.append(f"<b>Сообщение:</b>\n{message}")
+        lines.append(f"<b>Сообщение:</b>\n{_esc(message)}")
 
     text_html = "\n".join(lines)
 
@@ -181,8 +212,6 @@ async def lead_post(request: web.Request) -> web.Response:
             )
         except Exception:
             log.exception("Failed to send lead to manager. request_id=%s", request_id)
-            # do not fail client; lead already accepted by API (best UX)
-            # if you want strict mode, return 502 here.
 
     resp = web.json_response({"ok": True, "request_id": request_id})
     return _with_cors(request, resp)
@@ -225,14 +254,9 @@ def build_web_app(tg_app: Application) -> web.Application:
     app = web.Application(client_max_size=2 * 1024 * 1024)
     app["tg_app"] = tg_app
 
-    # Telegram webhook
     app.router.add_post("/webhook", telegram_webhook_handler)
-
-    # Leads endpoint for site
     app.router.add_route("OPTIONS", "/lead", lead_options)
     app.router.add_post("/lead", lead_post)
-
-    # Health
     app.router.add_get("/health", health)
 
     app.on_startup.append(on_startup)
@@ -243,14 +267,12 @@ def build_web_app(tg_app: Application) -> web.Application:
 def main() -> None:
     config.validate()
 
-    # DEBUG polling mode (local dev)
     if config.DEBUG:
         log.info("Starting in polling mode")
         tg_app = build_telegram_app()
         tg_app.run_polling(drop_pending_updates=True)
         return
 
-    # Webhook + custom routes on aiohttp
     tg_app = build_telegram_app()
     web_app = build_web_app(tg_app)
 
