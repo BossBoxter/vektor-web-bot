@@ -69,6 +69,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # package selection
+    if data == "NAV:HOW":
+        await q.message.reply_text(how_text(), reply_markup=how_kb())
+        await q.answer()
+        return
+
+    if data == "NAV:CONSULT":
+        # Консультация = лид без привязки к пакету
+        _leads[q.from_user.id] = LeadDraft(package_name="consult", step="name")
+        await q.message.reply_text("Консультация. " + strings(_lang()).ask_name, reply_markup=lead_cancel_kb())
+        await q.answer()
+        return
+
+    
     if data.startswith("PKG:"):
         name = data.split(":", 1)[1]
         if name not in PACKAGES:
