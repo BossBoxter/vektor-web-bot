@@ -3,18 +3,25 @@ from __future__ import annotations
 
 import html
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from .config import config
-from .text import strings
-from .ui import PACKAGES, menu_kb, packages_kb, render_package_text, package_details_kbhow_text, how_kb, lead_cancel_kb
 from .openrouter import ask_openrouter
-
-
+from .text import strings
+from .ui import (
+    PACKAGES,
+    menu_kb,
+    packages_kb,
+    render_package_text,
+    package_details_kb,
+    how_text,
+    how_kb,
+    lead_cancel_kb,
+)
 
 MAX_USER_TEXT = 4000
 MAX_AI_REPLY = 3500
@@ -22,7 +29,7 @@ MAX_AI_REPLY = 3500
 
 @dataclass
 class LeadDraft:
-    package_name: str
+    package_name: str  # package key from ui.PACKAGES OR "consult"
     name: str = ""
     contact: str = ""
     comment: str = ""
@@ -33,7 +40,7 @@ _leads: Dict[int, LeadDraft] = {}
 
 
 def _lang() -> str:
-    return config.DEFAULT_LANG if config.DEFAULT_LANG in ("ru", "en") else "ru"
+    return config.DEFAULT_LANG if getattr(config, "DEFAULT_LANG", "ru") in ("ru", "en") else "ru"
 
 
 def _esc(s: str) -> str:
@@ -57,7 +64,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     data = q.data or ""
 
-    # NAV
+    # ===== NAV =====
     if data == "NAV:MENU":
         await q.message.reply_text("Меню:", reply_markup=menu_kb())
         await q.answer()
@@ -68,38 +75,41 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         return
 
-    # package selection
     if data == "NAV:HOW":
         await q.message.reply_text(how_text(), reply_markup=how_kb())
         await q.answer()
         return
 
     if data == "NAV:CONSULT":
-        # Консультация = лид без привязки к пакету
+        # Консультация: лид без привязки к пакету
         _leads[q.from_user.id] = LeadDraft(package_name="consult", step="name")
-        await q.message.reply_text("Консультация. " + strings(_lang()).ask_name, reply_markup=lead_cancel_kb())
+        await q.message.reply_text("Консультация.\n\n" + strings(_lang()).ask_name, reply_markup=lead_cancel_kb())
         await q.answer()
         return
 
-    
+    # ===== PACKAGE DETAILS =====
     if data.startswith("PKG:"):
         name = data.split(":", 1)[1]
         if name not in PACKAGES:
             await q.answer("Не найдено", show_alert=True)
             return
-        await q.message.reply_text(render_package_text(name), parse_mode=ParseMode.HTML, reply_markup=package_details_kb())
+        await q.message.reply_text(
+            render_package_text(name),
+            parse_mode=ParseMode.HTML,
+            reply_markup=package_details_kb(),
+        )
         context.user_data["selected_package"] = name
         await q.answer()
         return
 
-    # lead flow
+    # ===== LEAD FLOW =====
     if data == "LEAD:ORDER":
         name = context.user_data.get("selected_package")
         if not name or name not in PACKAGES:
             await q.answer("Сначала выберите пакет", show_alert=True)
             return
         _leads[q.from_user.id] = LeadDraft(package_name=name, step="name")
-        await q.message.reply_text(strings(_lang()).ask_name)
+        await q.message.reply_text(strings(_lang()).ask_name, reply_markup=lead_cancel_kb())
         await q.answer()
         return
 
@@ -110,31 +120,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await q.answer()
-
-
-async def _notify_manager(update: Update, lead: LeadDraft):
-    if not config.MANAGER_CHAT_ID:
-        return
-    try:
-        chat_id = int(config.MANAGER_CHAT_ID)
-    except Exception:
-        return
-
-    pkg = PACKAGES.get(lead.package_name, {})
-    price = pkg.get("price", "")
-    time_ = pkg.get("time", "")
-
-    text = (
-        "<b>🆕 Новая заявка</b>\n"
-        f"<b>Бренд:</b> {_esc(config.BRAND_NAME)}\n"
-        f"<b>Пакет:</b> {_esc(lead.package_name)} ({_esc(price)} / {_esc(time_)})\n"
-        f"<b>Имя:</b> {_esc(lead.name)}\n"
-        f"<b>Контакт:</b> {_esc(lead.contact)}\n"
-        f"<b>Комментарий:</b>\n{_esc(lead.comment)}\n\n"
-        f"<b>От:</b> @{_esc(update.effective_user.username or '—')} / id={update.effective_user.id}"
-    )
-
-    await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -151,7 +136,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     uid = update.effective_user.id
 
-    # lead form
+    # ===== LEAD FORM =====
     if uid in _leads:
         lead = _leads[uid]
 
@@ -159,31 +144,37 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lead.name = text
             lead.step = "contact"
             _leads[uid] = lead
-            await msg.reply_text(strings(_lang()).ask_contact)
+            await msg.reply_text(strings(_lang()).ask_contact, reply_markup=lead_cancel_kb())
             return
 
         if lead.step == "contact":
             lead.contact = text
             lead.step = "comment"
             _leads[uid] = lead
-            await msg.reply_text(strings(_lang()).ask_comment)
+            await msg.reply_text(strings(_lang()).ask_comment, reply_markup=lead_cancel_kb())
             return
 
         if lead.step == "comment":
             lead.comment = text
             _leads.pop(uid, None)
 
-            # notify manager
+            # Manager notification
             if config.MANAGER_CHAT_ID:
                 try:
                     chat_id = int(config.MANAGER_CHAT_ID)
-                    pkg = PACKAGES.get(lead.package_name, {})
-                    price = pkg.get("price", "")
-                    time_ = pkg.get("time", "")
+
+                    if lead.package_name == "consult":
+                        pkg_line = "Консультация"
+                    else:
+                        pkg = PACKAGES.get(lead.package_name, {})
+                        price = pkg.get("price", "")
+                        time_ = pkg.get("time", "")
+                        pkg_line = f"{lead.package_name} ({price} / {time_})"
+
                     notify = (
                         "<b>🆕 Новая заявка</b>\n"
                         f"<b>Бренд:</b> {_esc(config.BRAND_NAME)}\n"
-                        f"<b>Пакет:</b> {_esc(lead.package_name)} ({_esc(price)} / {_esc(time_)})\n"
+                        f"<b>Пакет:</b> {_esc(pkg_line)}\n"
                         f"<b>Имя:</b> {_esc(lead.name)}\n"
                         f"<b>Контакт:</b> {_esc(lead.contact)}\n"
                         f"<b>Комментарий:</b>\n{_esc(lead.comment)}\n\n"
@@ -201,7 +192,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(strings(_lang()).sent_ok, reply_markup=menu_kb())
             return
 
-    # AI or fallback-to-manager
+    # ===== AI OR FALLBACK QUESTION =====
     if config.OPENROUTER_API_KEY:
         try:
             reply = await ask_openrouter(text)
