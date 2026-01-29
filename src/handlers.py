@@ -11,8 +11,9 @@ from telegram.ext import ContextTypes
 
 from .config import config
 from .text import strings
-from .ui import PACKAGES, menu_kb, packages_kb, render_package_text, package_details_kb
+from .ui import PACKAGES, menu_kb, packages_kb, render_package_text, package_details_kbhow_text, how_kb, lead_cancel_kb
 from .openrouter import ask_openrouter
+
 
 
 MAX_USER_TEXT = 4000
