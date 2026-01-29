@@ -31,14 +31,11 @@ from .ui import (
 
 MAX_USER_TEXT = 4000
 MAX_AI_REPLY = 3500
-
 MAX_LEADS_PER_USER = 2
 
-# Persistent counter for leads
 _DATA_DIR = Path(os.getenv("BOT_DATA_DIR", "data"))
 _LIMITS_FILE = _DATA_DIR / "limits.json"
 
-# Spam guard (persistent bans/cooldowns)
 _GUARD = SpamGuard()
 
 
@@ -166,11 +163,10 @@ def _is_valid_comment(comment: str) -> bool:
     return True
 
 
-def _esc(s: str) -> str:
+def _esc_html(s: str) -> str:
     return html.escape(s or "", quote=False)
 
 
-# --- lead flow ---
 @dataclass
 class LeadDraft:
     package_name: str  # key from ui.PACKAGES OR "consult"
@@ -187,6 +183,10 @@ def _lang() -> str:
     return config.DEFAULT_LANG if getattr(config, "DEFAULT_LANG", "ru") in ("ru", "en") else "ru"
 
 
+def _t() -> dict:
+    return strings(_lang())
+
+
 def _leads_remaining(user_id: int) -> int:
     used = _get_user_leads_used(user_id)
     return max(0, MAX_LEADS_PER_USER - used)
@@ -197,10 +197,7 @@ def _lead_allowed(user_id: int) -> bool:
 
 
 def _lead_gate_text() -> str:
-    return (
-        f"Лимит заявок исчерпан ({MAX_LEADS_PER_USER}/{MAX_LEADS_PER_USER}).\n"
-        "Доступно: задать нормальный вопрос сообщением или обратиться в поддержку."
-    )
+    return _t()["lead_limit_reached"]
 
 
 def _format_pkg_line(lead: LeadDraft) -> str:
@@ -212,16 +209,16 @@ def _format_pkg_line(lead: LeadDraft) -> str:
     return f"{lead.package_name} ({price} / {time_})" if (price or time_) else lead.package_name
 
 
-# --- handlers ---
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = _lang()
-    s = strings(lang)
-    title = f"{s.start_title} {config.BRAND_NAME}"
-    await update.effective_message.reply_text(f"{title}\n\n{s.start_body}", reply_markup=menu_kb())
+    t = _t()
+    title = t["start_title"]
+    body = t["start_body"]
+    # В text.py жирный в Markdown (**) -> используем Markdown
+    await update.effective_message.reply_text(f"{title}\n\n{body}", reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_packages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(strings(_lang()).choose_package, reply_markup=packages_kb())
+    await update.effective_message.reply_text(_t()["choose_package"], reply_markup=packages_kb(), parse_mode=ParseMode.MARKDOWN)
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -230,29 +227,31 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     data = q.data or ""
     uid = q.from_user.id
+    t = _t()
 
     if data == "NAV:MENU":
-        await q.message.reply_text("Меню:", reply_markup=menu_kb())
+        await q.message.reply_text("**Меню 🏠**", reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
         await q.answer()
         return
 
     if data == "NAV:PACKAGES":
-        await q.message.reply_text(strings(_lang()).choose_package, reply_markup=packages_kb())
+        await q.message.reply_text(t["choose_package"], reply_markup=packages_kb(), parse_mode=ParseMode.MARKDOWN)
         await q.answer()
         return
 
     if data == "NAV:HOW":
+        # how_text() у тебя без Markdown, оставляем plain
         await q.message.reply_text(how_text(), reply_markup=how_kb())
         await q.answer()
         return
 
     if data == "NAV:CONSULT":
         if not _lead_allowed(uid):
-            await q.message.reply_text(_lead_gate_text(), reply_markup=menu_kb())
+            await q.message.reply_text(_lead_gate_text(), reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
             await q.answer()
             return
         _leads[uid] = LeadDraft(package_name="consult", step="name")
-        await q.message.reply_text("Консультация.\n\n" + strings(_lang()).ask_name, reply_markup=lead_cancel_kb())
+        await q.message.reply_text(t["consult_start"] + "\n\n" + t["ask_name"], reply_markup=lead_cancel_kb(), parse_mode=ParseMode.MARKDOWN)
         await q.answer()
         return
 
@@ -263,7 +262,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await q.message.reply_text(
             render_package_text(name),
-            parse_mode=ParseMode.HTML,
+            parse_mode=ParseMode.HTML,  # ui.render_package_text uses <b>
             reply_markup=package_details_kb(),
         )
         context.user_data["selected_package"] = name
@@ -272,22 +271,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "LEAD:ORDER":
         if not _lead_allowed(uid):
-            await q.message.reply_text(_lead_gate_text(), reply_markup=menu_kb())
+            await q.message.reply_text(_lead_gate_text(), reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
             await q.answer()
             return
-
         name = context.user_data.get("selected_package")
         if not name or name not in PACKAGES:
-            await q.answer("Сначала выберите пакет", show_alert=True)
+            await q.answer("Сначала выберите вариант", show_alert=True)
             return
         _leads[uid] = LeadDraft(package_name=name, step="name")
-        await q.message.reply_text(strings(_lang()).ask_name, reply_markup=lead_cancel_kb())
+        await q.message.reply_text(t["ask_name"], reply_markup=lead_cancel_kb(), parse_mode=ParseMode.MARKDOWN)
         await q.answer()
         return
 
     if data == "LEAD:CANCEL":
         _leads.pop(uid, None)
-        await q.message.reply_text("Отменено.", reply_markup=menu_kb())
+        await q.message.reply_text(t["cancelled"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
         await q.answer()
         return
 
@@ -298,30 +296,27 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg:
         return
-
     uid = update.effective_user.id
+    t = _t()
 
-    # ===== SPAM / COOLDOWN / BAN POLICY =====
+    # spam / cooldown / ban
     status, left = _GUARD.on_message(uid)
     if status == "cooldown":
         if _GUARD.should_notice(uid):
             _GUARD._set_notice(uid, int(time.time()))
-            await msg.reply_text(f"Слишком часто. Подождите {left} сек.")
+            await msg.reply_text(t["cooldown_seconds"].format(seconds=left), parse_mode=ParseMode.MARKDOWN)
         return
-
     if status == "ban":
         if _GUARD.should_notice(uid):
             _GUARD._set_notice(uid, int(time.time()))
-            # hour/day text is determined by seconds left, without extra branching
-            await msg.reply_text(f"Блокировка за спам. Подождите {left} сек или обратитесь в поддержку.")
+            await msg.reply_text(t["hard_block"], parse_mode=ParseMode.MARKDOWN)
         return
 
-    # ===== normal processing =====
     text = (msg.text or "").strip()
     if not text:
         return
     if len(text) > MAX_USER_TEXT:
-        await msg.reply_text(strings(_lang()).too_long)
+        await msg.reply_text(t["too_long"], parse_mode=ParseMode.MARKDOWN)
         return
 
     # lead flow
@@ -330,38 +325,37 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if lead.step == "name":
             if not _is_valid_name(text):
-                await msg.reply_text("Имя выглядит как спам/мусор. Введите нормальное имя.", reply_markup=lead_cancel_kb())
+                await msg.reply_text(t["bad_name"], reply_markup=lead_cancel_kb(), parse_mode=ParseMode.MARKDOWN)
                 return
             lead.name = text
             lead.step = "contact"
             _leads[uid] = lead
-            await msg.reply_text(strings(_lang()).ask_contact, reply_markup=lead_cancel_kb())
+            await msg.reply_text(t["ask_contact"], reply_markup=lead_cancel_kb(), parse_mode=ParseMode.MARKDOWN)
             return
 
         if lead.step == "contact":
             if not _is_valid_contact(text):
-                await msg.reply_text("Контакт выглядит как спам/мусор. Введите Telegram @username, телефон или email.", reply_markup=lead_cancel_kb())
+                await msg.reply_text(t["bad_contact"], reply_markup=lead_cancel_kb(), parse_mode=ParseMode.MARKDOWN)
                 return
             lead.contact = text
             lead.step = "comment"
             _leads[uid] = lead
-            await msg.reply_text(strings(_lang()).ask_comment, reply_markup=lead_cancel_kb())
+            await msg.reply_text(t["ask_comment"], reply_markup=lead_cancel_kb(), parse_mode=ParseMode.MARKDOWN)
             return
 
         if lead.step == "comment":
             if not _is_valid_comment(text):
-                await msg.reply_text("Описание выглядит как спам/мусор. Напишите нормальным текстом, что нужно сделать.", reply_markup=lead_cancel_kb())
+                await msg.reply_text(t["bad_comment"], reply_markup=lead_cancel_kb(), parse_mode=ParseMode.MARKDOWN)
                 return
 
             if not _lead_allowed(uid):
                 _leads.pop(uid, None)
-                await msg.reply_text(_lead_gate_text(), reply_markup=menu_kb())
+                await msg.reply_text(_lead_gate_text(), reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
                 return
 
             lead.comment = text
             _leads.pop(uid, None)
 
-            # send "target lead" to manager
             if config.MANAGER_CHAT_ID:
                 try:
                     chat_id = int(config.MANAGER_CHAT_ID)
@@ -369,12 +363,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                     notify = (
                         "<b>🆕 Целевая заявка</b>\n"
-                        f"<b>Бренд:</b> {_esc(config.BRAND_NAME)}\n"
-                        f"<b>Пакет:</b> {_esc(pkg_line)}\n"
-                        f"<b>Имя:</b> {_esc(lead.name)}\n"
-                        f"<b>Контакт:</b> {_esc(lead.contact)}\n"
-                        f"<b>Комментарий:</b>\n{_esc(lead.comment)}\n\n"
-                        f"<b>От:</b> @{_esc(update.effective_user.username or '—')} / id={update.effective_user.id}"
+                        f"<b>Бренд:</b> {_esc_html(config.BRAND_NAME)}\n"
+                        f"<b>Пакет:</b> {_esc_html(pkg_line)}\n"
+                        f"<b>Имя:</b> {_esc_html(lead.name)}\n"
+                        f"<b>Контакт:</b> {_esc_html(lead.contact)}\n"
+                        f"<b>Комментарий:</b>\n{_esc_html(lead.comment)}\n\n"
+                        f"<b>От:</b> @{_esc_html(update.effective_user.username or '—')} / id={update.effective_user.id}"
                     )
                     await context.bot.send_message(
                         chat_id=chat_id,
@@ -385,19 +379,20 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     used = _inc_user_leads_used(uid)
                     remaining = max(0, MAX_LEADS_PER_USER - used)
                     await msg.reply_text(
-                        f"{strings(_lang()).sent_ok}\nОсталось заявок: {remaining}.",
+                        t["sent_ok"] + f"\n\nОсталось заявок: {remaining}.",
                         reply_markup=menu_kb(),
+                        parse_mode=ParseMode.MARKDOWN,
                     )
                 except Exception:
-                    await msg.reply_text(strings(_lang()).sent_ok, reply_markup=menu_kb())
+                    await msg.reply_text(t["sent_ok"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
             else:
-                await msg.reply_text(strings(_lang()).sent_ok, reply_markup=menu_kb())
+                await msg.reply_text(t["sent_ok"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
             return
 
-    # limit reached: only "target question" allowed
+    # limit reached: only target question
     if not _lead_allowed(uid):
         if _is_garbage_text(text):
-            await msg.reply_text(_lead_gate_text(), reply_markup=menu_kb())
+            await msg.reply_text(_lead_gate_text(), reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
             return
 
         if config.MANAGER_CHAT_ID:
@@ -405,18 +400,18 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id = int(config.MANAGER_CHAT_ID)
                 notify = (
                     "<b>🆕 Целевой вопрос (лимит заявок исчерпан)</b>\n"
-                    f"<b>От:</b> @{_esc(update.effective_user.username or '—')} / id={update.effective_user.id}\n\n"
-                    f"{_esc(text)}"
+                    f"<b>От:</b> @{_esc_html(update.effective_user.username or '—')} / id={update.effective_user.id}\n\n"
+                    f"{_esc_html(text)}"
                 )
                 await context.bot.send_message(chat_id=chat_id, text=notify, parse_mode=ParseMode.HTML)
             except Exception:
                 pass
-        await msg.reply_text("Вопрос принят. Поддержка/менеджер ответит.", reply_markup=menu_kb())
+        await msg.reply_text(t["sent_ok_alt"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
         return
 
-    # lead still allowed: normal question path, but reject garbage
+    # reject garbage
     if _is_garbage_text(text):
-        await msg.reply_text("Сообщение похоже на спам/мусор. Отправьте нормальный вопрос одним сообщением.", reply_markup=menu_kb())
+        await msg.reply_text(t["garbage_text"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
         return
 
     # AI
@@ -438,11 +433,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id = int(config.MANAGER_CHAT_ID)
             notify = (
                 "<b>🆕 Целевой вопрос</b>\n"
-                f"<b>От:</b> @{_esc(update.effective_user.username or '—')} / id={update.effective_user.id}\n\n"
-                f"{_esc(text)}"
+                f"<b>От:</b> @{_esc_html(update.effective_user.username or '—')} / id={update.effective_user.id}\n\n"
+                f"{_esc_html(text)}"
             )
             await context.bot.send_message(chat_id=chat_id, text=notify, parse_mode=ParseMode.HTML)
         except Exception:
             pass
 
-    await msg.reply_text(strings(_lang()).sent_ok_alt, reply_markup=menu_kb())
+    await msg.reply_text(t["sent_ok_alt"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
