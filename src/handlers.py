@@ -22,6 +22,7 @@ from .ui import (
     PACKAGES,
     menu_kb,
     menu_text,
+    packages_kb,
     goal_choice_kb,
     render_package_text,
     package_details_kb,
@@ -148,19 +149,16 @@ def _looks_like_gibberish(s: str) -> bool:
 
     compact = re.sub(r"\s+", "", s)
 
-    # repeated short chunk
     if re.match(r"^(.{2,5})\1{3,}$", compact, flags=re.IGNORECASE):
         return True
 
     toks = _tokens(s)
 
-    # one long token
     if len(toks) == 1 and len(toks[0]) >= 10:
         tok = toks[0]
         if not any(ch.isdigit() for ch in tok) and _unique_bigram_ratio(tok) < 0.35:
             return True
 
-    # one "word" but long
     if len(toks) == 1 and len(compact) >= 18:
         return True
 
@@ -296,7 +294,7 @@ def _recommended_by_goal(goal: str) -> Optional[str]:
 
 
 # =========================
-# HANDLERS
+# COMMANDS
 # =========================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
@@ -307,6 +305,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _set_back(context, "NAV:MENU")
 
 
+async def cmd_packages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Служебная команда: показать полный список пакетов
+    await update.effective_message.reply_text(
+        "Все варианты 📦",
+        reply_markup=packages_kb(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    _set_back(context, "NAV:MENU")
+
+
+# =========================
+# CALLBACKS
+# =========================
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not q:
@@ -324,7 +335,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "NAV:BACK":
         back = _get_back(context)
-        # Back targets: NAV:MENU or GOAL:<X>
         if back == "NAV:MENU":
             await q.message.reply_text(menu_text(), reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
             _set_back(context, "NAV:MENU")
@@ -334,7 +344,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             goal = back.split(":", 1)[1]
             rec = _recommended_by_goal(goal)
             if rec:
-                await q.message.reply_text(t["goal_ack"], reply_markup=goal_choice_kb(goal, rec), parse_mode=ParseMode.MARKDOWN)
+                await q.message.reply_text(t["goal_ack"], reply_markup=goal_choice_kb(goal), parse_mode=ParseMode.MARKDOWN)
                 _set_back(context, "NAV:MENU")
                 await q.answer()
                 return
@@ -371,11 +381,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Не найдено", show_alert=True)
             return
         _set_back(context, f"GOAL:{goal}")
-        await q.message.reply_text(
-            t["goal_ack"],
-            reply_markup=goal_choice_kb(goal, rec),
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await q.message.reply_text(t["goal_ack"], reply_markup=goal_choice_kb(goal), parse_mode=ParseMode.MARKDOWN)
         await q.answer()
         return
 
@@ -422,7 +428,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         _leads[uid] = LeadDraft(package_name=name, step="name")
-        # Back from lead flow goes to menu (чёткий якорь)
         _set_back(context, "NAV:MENU")
         await q.message.reply_text(t["ask_name"], reply_markup=lead_cancel_kb(), parse_mode=ParseMode.MARKDOWN)
         await q.answer()
@@ -438,6 +443,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
 
+# =========================
+# TEXT MESSAGES
+# =========================
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not msg:
@@ -446,7 +454,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     t = _t()
 
-    # SpamGuard
     status, left = _GUARD.on_message(uid)
     if status == "cooldown":
         if _GUARD.should_notice(uid):
@@ -546,17 +553,15 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text(t["sent_ok"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
             return
 
-    # Outside lead flow: minimal message length
+    # Outside lead flow: minimal length
     if len(text) < MIN_GENERAL_TEXT:
         await msg.reply_text(t["too_short_general"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
         return
 
-    # Block garbage before manager/AI
     if _is_garbage_text(text):
         await msg.reply_text(t["garbage_text"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
         return
 
-    # Lead limit reached: allow only target question
     if not _lead_allowed(uid):
         if config.MANAGER_CHAT_ID:
             try:
@@ -572,7 +577,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(t["sent_ok_alt"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
         return
 
-    # AI
     if config.OPENROUTER_API_KEY:
         try:
             reply = await ask_openrouter(text)
@@ -585,7 +589,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    # Fallback: forward as target question
     if config.MANAGER_CHAT_ID:
         try:
             chat_id = int(config.MANAGER_CHAT_ID)
