@@ -8,7 +8,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 from telegram import Update
 from telegram.constants import ParseMode
@@ -21,7 +21,8 @@ from .text import strings
 from .ui import (
     PACKAGES,
     menu_kb,
-    packages_kb,
+    menu_text,
+    goal_choice_kb,
     render_package_text,
     package_details_kb,
     how_text,
@@ -44,13 +45,17 @@ _LIMITS_FILE = _DATA_DIR / "limits.json"
 
 _GUARD = SpamGuard()
 
+# Goal -> recommended package
 _GOALS = {
     "FAST": "Быстрый запуск",
     "LEADS": "Продающий лендинг",
     "BRAND": "Личный бренд",
-    "SHOP": "Магазин / каталог",
     "AUTO": "Автоматизация + бот",
 }
+
+# Back stack keys
+_K_BACK = "nav_back"               # str callback marker
+_K_SELECTED_PACKAGE = "selected_package"
 
 
 def _load_limits() -> dict:
@@ -237,7 +242,7 @@ def _esc_html(s: str) -> str:
 # =========================
 @dataclass
 class LeadDraft:
-    package_name: str  # key from ui.PACKAGES OR "consult"
+    package_name: str  # "consult" or a key from PACKAGES
     name: str = ""
     contact: str = ""
     comment: str = ""
@@ -277,24 +282,29 @@ def _format_pkg_line(lead: LeadDraft) -> str:
     return f"{lead.package_name} ({price} / {time_})" if (price or time_) else lead.package_name
 
 
+def _set_back(context: ContextTypes.DEFAULT_TYPE, marker: str) -> None:
+    context.user_data[_K_BACK] = marker
+
+
+def _get_back(context: ContextTypes.DEFAULT_TYPE) -> str:
+    return str(context.user_data.get(_K_BACK) or "NAV:MENU")
+
+
+def _recommended_by_goal(goal: str) -> Optional[str]:
+    name = _GOALS.get(goal)
+    return name if (name and name in PACKAGES) else None
+
+
 # =========================
 # HANDLERS
 # =========================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    t = _t()
     await update.effective_message.reply_text(
-        f"{t['start_title']}\n\n{t['start_body']}",
+        menu_text(),
         reply_markup=menu_kb(),
         parse_mode=ParseMode.MARKDOWN,
     )
-
-
-async def cmd_packages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(
-        _t()["choose_package"],
-        reply_markup=packages_kb(),
-        parse_mode=ParseMode.MARKDOWN,
-    )
+    _set_back(context, "NAV:MENU")
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -307,20 +317,34 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t = _t()
 
     if data == "NAV:MENU":
-        await q.message.reply_text(
-            f"{t['start_title']}\n\n{t['start_body']}",
-            reply_markup=menu_kb(),
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await q.message.reply_text(menu_text(), reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
+        _set_back(context, "NAV:MENU")
         await q.answer()
         return
 
-    if data == "NAV:PACKAGES":
-        await q.message.reply_text(t["choose_package"], reply_markup=packages_kb(), parse_mode=ParseMode.MARKDOWN)
+    if data == "NAV:BACK":
+        back = _get_back(context)
+        # Back targets: NAV:MENU or GOAL:<X>
+        if back == "NAV:MENU":
+            await q.message.reply_text(menu_text(), reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
+            _set_back(context, "NAV:MENU")
+            await q.answer()
+            return
+        if back.startswith("GOAL:"):
+            goal = back.split(":", 1)[1]
+            rec = _recommended_by_goal(goal)
+            if rec:
+                await q.message.reply_text(t["goal_ack"], reply_markup=goal_choice_kb(goal, rec), parse_mode=ParseMode.MARKDOWN)
+                _set_back(context, "NAV:MENU")
+                await q.answer()
+                return
+        await q.message.reply_text(menu_text(), reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
+        _set_back(context, "NAV:MENU")
         await q.answer()
         return
 
     if data == "NAV:HOW":
+        _set_back(context, "NAV:MENU")
         await q.message.reply_text(how_text(), reply_markup=how_kb())
         await q.answer()
         return
@@ -331,6 +355,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer()
             return
         _leads[uid] = LeadDraft(package_name="consult", step="name")
+        _set_back(context, "NAV:MENU")
         await q.message.reply_text(
             t["consult_start"] + "\n\n" + t["ask_name"],
             reply_markup=lead_cancel_kb(),
@@ -341,16 +366,32 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("GOAL:"):
         goal = data.split(":", 1)[1].strip()
-        pkg_name = _GOALS.get(goal)
-        if not pkg_name or pkg_name not in PACKAGES:
+        rec = _recommended_by_goal(goal)
+        if not rec:
             await q.answer("Не найдено", show_alert=True)
             return
+        _set_back(context, f"GOAL:{goal}")
         await q.message.reply_text(
-            render_package_text(pkg_name),
+            t["goal_ack"],
+            reply_markup=goal_choice_kb(goal, rec),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        await q.answer()
+        return
+
+    if data.startswith("GOALSHOW:"):
+        goal = data.split(":", 1)[1].strip()
+        rec = _recommended_by_goal(goal)
+        if not rec:
+            await q.answer("Не найдено", show_alert=True)
+            return
+        _set_back(context, f"GOAL:{goal}")
+        await q.message.reply_text(
+            render_package_text(rec),
             parse_mode=ParseMode.HTML,
             reply_markup=package_details_kb(),
         )
-        context.user_data["selected_package"] = pkg_name
+        context.user_data[_K_SELECTED_PACKAGE] = rec
         await q.answer()
         return
 
@@ -359,12 +400,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if name not in PACKAGES:
             await q.answer("Не найдено", show_alert=True)
             return
+        _set_back(context, _get_back(context) if _get_back(context).startswith("GOAL:") else "NAV:MENU")
         await q.message.reply_text(
             render_package_text(name),
             parse_mode=ParseMode.HTML,
             reply_markup=package_details_kb(),
         )
-        context.user_data["selected_package"] = name
+        context.user_data[_K_SELECTED_PACKAGE] = name
         await q.answer()
         return
 
@@ -374,12 +416,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer()
             return
 
-        name = context.user_data.get("selected_package")
+        name = context.user_data.get(_K_SELECTED_PACKAGE)
         if not name or name not in PACKAGES:
             await q.answer("Сначала выберите вариант", show_alert=True)
             return
 
         _leads[uid] = LeadDraft(package_name=name, step="name")
+        # Back from lead flow goes to menu (чёткий якорь)
+        _set_back(context, "NAV:MENU")
         await q.message.reply_text(t["ask_name"], reply_markup=lead_cancel_kb(), parse_mode=ParseMode.MARKDOWN)
         await q.answer()
         return
@@ -387,6 +431,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "LEAD:CANCEL":
         _leads.pop(uid, None)
         await q.message.reply_text(t["cancelled"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
+        _set_back(context, "NAV:MENU")
         await q.answer()
         return
 
@@ -501,7 +546,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text(t["sent_ok"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
             return
 
-    # Outside lead flow: require minimal length for questions/messages
+    # Outside lead flow: minimal message length
     if len(text) < MIN_GENERAL_TEXT:
         await msg.reply_text(t["too_short_general"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
         return
@@ -511,7 +556,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(t["garbage_text"], reply_markup=menu_kb(), parse_mode=ParseMode.MARKDOWN)
         return
 
-    # Lead limit reached: allow only target question (already validated)
+    # Lead limit reached: allow only target question
     if not _lead_allowed(uid):
         if config.MANAGER_CHAT_ID:
             try:
