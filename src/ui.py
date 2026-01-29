@@ -125,7 +125,7 @@ SUPPORT_URL = "https://t.me/bloknotpr"
 
 
 # =========================
-# КЛАВИАТУРЫ (упрощённая навигация)
+# КЛАВИАТУРЫ
 # =========================
 
 def menu_kb() -> InlineKeyboardMarkup:
@@ -140,8 +140,18 @@ def menu_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def goal_choice_kb(goal: str, recommended_package_name: str) -> InlineKeyboardMarkup:
-    # Уровень 2: 1 рекомендованный вариант + индивидуально + навигация-якоря
+def packages_kb() -> InlineKeyboardMarkup:
+    # Служебное меню (для /packages). Основная навигация его не использует.
+    rows = []
+    for name, p in PACKAGES.items():
+        rows.append([InlineKeyboardButton(p["button"], callback_data=f"PKG:{name}")])
+    rows.append([InlineKeyboardButton("🏠 В меню", callback_data="NAV:MENU")])
+    rows.append([InlineKeyboardButton("🆘 Поддержка", url=SUPPORT_URL)])
+    return InlineKeyboardMarkup(rows)
+
+
+def goal_choice_kb(goal: str) -> InlineKeyboardMarkup:
+    # Уровень 2: 1 действие “показать решение” + индивидуально + якоря
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Показать решение", callback_data=f"GOALSHOW:{goal}")],
         [InlineKeyboardButton("🧩 Индивидуально", callback_data="PKG:Индивидуальный проект")],
